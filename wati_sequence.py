@@ -142,13 +142,6 @@ def get_google_credentials() -> Credentials:
 
 
 
-
-
-
-
-
-
-
             f.write(creds.to_json())
     return creds
 
