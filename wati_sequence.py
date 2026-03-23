@@ -389,11 +389,10 @@ def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     }
     payload = {
         "template_name": template_name,
-        "broadcast_name": f"sequence_{template_name}",
+        "broadcast_name": f"sequence_{template_name}_{formatted_phone}_{int(time.time())}",
         "parameters": [
             {"name": "first_name", "value": first_name}
-        ],
-        "parameterFormat": "NAMED"
+        ]
     }
 
     try:
