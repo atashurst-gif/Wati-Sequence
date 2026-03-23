@@ -136,15 +136,6 @@ def get_google_credentials() -> Credentials:
         with open(TOKEN_FILE, "w") as f:
             f.write(creds.to_json())
     return creds
-
-
-
-
-
-
-            f.write(creds.to_json())
-    return creds
-
 # ─────────────────────────────────────────────
 # Phone Number Formatting
 # ─────────────────────────────────────────────
