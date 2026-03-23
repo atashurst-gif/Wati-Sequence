@@ -416,9 +416,25 @@ def process_sequences(service):
         if not track:
             continue
 
-        # Skip if already marked replied in tracking
+        # If replied, check if 24h has passed with no further reply - auto-resume
         if track["status"].lower() == "replied":
-            continue
+            replied_at_str = track.get("replied_at", "")
+            if replied_at_str:
+                try:
+                    replied_at = datetime.datetime.strptime(replied_at_str, "%d/%m/%Y %H:%M")
+                    hours_since = (datetime.datetime.now() - replied_at).total_seconds() / 3600
+                    if hours_since < 24:
+                        continue  # Still within 24h window, skip
+                    # 24h passed with no new reply - resume sequence
+                    log.info(f"{tl_ref}: 24h since reply, resuming sequence")
+                    update_tracking_row(service, track["row"], track["current_step"], track["last_sent"], "active")
+                    update_sheet1_status(service, track["phone"], "No contact")
+                except ValueError:
+                    continue
+            else:
+                continue
+
+
 
         # Get sequence for this campaign
         sequence = get_sequence_for_campaign(campaign)
