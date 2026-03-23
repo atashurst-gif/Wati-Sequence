@@ -101,7 +101,7 @@ BST_SEQUENCE = [
 ]
 
 # Statuses that mean the sequence should NOT run
-STOPPED_STATUSES = {"replied", "completed", "opted out", "converted", "do not contact"}
+STOPPED_STATUSES = {"replied", "completed", "opted out", "converted", "do not contact", "pending"}
 
 # ─────────────────────────────────────────────
 # Google Auth
