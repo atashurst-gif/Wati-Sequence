@@ -324,12 +324,62 @@ def update_sheet1_status(service, phone: str, status: str):
 # WATI API
 # ─────────────────────────────────────────────
 
+def add_wati_contact(phone: str, first_name: str) -> bool:
+    """Add a contact to WATI before sending a template."""
+    formatted_phone = format_phone(phone)
+    url = f"{WATI_API_URL}/api/v1/addContact/{formatted_phone}"
+    headers = {
+        "Authorization": f"Bearer {WATI_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "name": first_name,
+        "customParams": [{"name": "first_name", "value": first_name}]
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        if resp.status_code in (200, 201):
+            log.info(f"Contact added: {formatted_phone} ({first_name})")
+            return True
+        else:
+            log.warning(f"Add contact {resp.status_code} for {formatted_phone}: {resp.text}")
+            return False
+    except Exception as e:
+        log.error(f"Add contact failed for {formatted_phone}: {e}")
+        return False
+
+
+def add_wati_contact(phone, first_name):
+    """Add a contact to WATI before sending a template."""
+    formatted_phone = format_phone(phone)
+    url = f"{WATI_API_URL}/api/v1/addContact/{formatted_phone}"
+    headers = {
+        "Authorization": f"Bearer {WATI_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "name": first_name,
+        "customParams": [{"name": "first_name", "value": first_name}]
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        if resp.status_code in (200, 201):
+            log.info(f"Contact added: {formatted_phone} ({first_name})")
+            return True
+        else:
+            log.warning(f"Add contact {resp.status_code} for {formatted_phone}: {resp.text}")
+            return False
+    except Exception as e:
+        log.error(f"Add contact failed for {formatted_phone}: {e}")
+        return False
+
 def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     """
     Send a WhatsApp template message via WATI API.
     Returns True on success.
     """
     formatted_phone = format_phone(phone)
+    add_wati_contact(phone, first_name)
     url = f"{WATI_API_URL}/api/v1/sendTemplateMessage/{formatted_phone}"
     headers = {
         "Authorization": f"Bearer {WATI_TOKEN}",
