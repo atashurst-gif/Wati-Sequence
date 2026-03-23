@@ -105,9 +105,25 @@ STOPPED_STATUSES = {"replied", "completed", "opted out", "converted", "do not co
 
 # ─────────────────────────────────────────────
 # Google Auth
-# ─────────────────────────────────────────────
-
 def get_google_credentials() -> Credentials:
+    token_b64 = os.getenv("GOOGLE_TOKEN_B64", "")
+    creds_b64 = os.getenv("GOOGLE_CREDENTIALS_B64", "")
+    if token_b64:
+        token_json = json.loads(_safe_b64(token_b64))
+        creds_json = json.loads(_safe_b64(creds_b64)) if creds_b64 else {}
+        installed = creds_json.get("installed", {})
+        creds = Credentials(
+            token=token_json.get("token"),
+            refresh_token=token_json.get("refresh_token"),
+            token_uri=token_json.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=token_json.get("client_id") or installed.get("client_id"),
+            client_secret=token_json.get("client_secret") or installed.get("client_secret"),
+            scopes=token_json.get("scopes", SCOPES),
+        )
+        if creds.expired and creds.refresh_token:
+            log.info("Refreshing expired Google token...")
+            creds.refresh(Request())
+        return creds
     creds = None
     if Path(TOKEN_FILE).exists():
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
@@ -118,6 +134,21 @@ def get_google_credentials() -> Credentials:
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
         with open(TOKEN_FILE, "w") as f:
+            f.write(creds.to_json())
+    return creds
+
+
+
+
+
+
+
+
+
+
+
+
+
             f.write(creds.to_json())
     return creds
 
