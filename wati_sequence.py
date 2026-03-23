@@ -382,7 +382,7 @@ def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     """
     formatted_phone = format_phone(phone)
     add_wati_contact(phone, first_name)
-    url = f"{WATI_API_URL}/api/v2/sendTemplateMessage/{formatted_phone}"
+    url = f"{WATI_API_URL}/api/v1/sendTemplateMessage?whatsappNumber={formatted_phone}"
     headers = {
         "Authorization": f"Bearer {WATI_TOKEN}",
         "Content-Type": "application/json"
