@@ -392,7 +392,8 @@ def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
         "broadcast_name": f"sequence_{template_name}",
         "parameters": [
             {"name": "first_name", "value": first_name}
-        ]
+        ],
+        "parameterFormat": "NAMED"
     }
 
     try:
