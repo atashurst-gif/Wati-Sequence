@@ -401,7 +401,7 @@ def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
             log.info(f"✓ Sent {template_name} to {formatted_phone} ({first_name})")
             return True
         else:
-            log.error(f"WATI API error {response.status_code}: {response.text}")
+            log.error(f"WATI API error {response.status_code}: {response.text} | URL: {url} | Payload: {payload}")
             return False
     except Exception as e:
         log.error(f"WATI request failed for {formatted_phone}: {e}")
