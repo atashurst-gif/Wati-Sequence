@@ -31,21 +31,14 @@ load_dotenv()
 
 # Decode Google credentials from base64 env vars (Railway deployment)
 import base64 as _b64
-
-def _safe_b64(s):
-    """Fix missing padding before decoding."""
-    s = s.strip()
-    s += "=" * (-len(s) % 4)
-    return _b64.b64decode(s)
-
 _creds_b64 = os.getenv('GOOGLE_CREDENTIALS_B64')
 _token_b64  = os.getenv('GOOGLE_TOKEN_B64')
 if _creds_b64:
     with open('credentials.json', 'wb') as _f:
-        _f.write(_safe_b64(_creds_b64))
+        _f.write(_b64.b64decode(_creds_b64))
 if _token_b64:
     with open('token.json', 'wb') as _f:
-        _f.write(_safe_b64(_token_b64))
+        _f.write(_b64.b64decode(_token_b64))
 
 logging.basicConfig(
     level=logging.INFO,
