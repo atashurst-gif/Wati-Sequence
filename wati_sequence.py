@@ -26,10 +26,10 @@ _creds_b64 = os.getenv('GOOGLE_CREDENTIALS_B64')
 _token_b64  = os.getenv('GOOGLE_TOKEN_B64')
 if _creds_b64:
     with open('credentials.json', 'wb') as _f:
-        _f.write(base64.b64decode(_creds_b64))
+        _f.write(base64.b64decode(_creds_b64 + "=="))
 if _token_b64:
     with open('token.json', 'wb') as _f:
-        _f.write(base64.b64decode(_token_b64))
+        _f.write(base64.b64decode(_token_b64 + "=="))
 
 logging.basicConfig(
     level=logging.INFO,
