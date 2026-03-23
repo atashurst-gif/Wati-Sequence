@@ -249,6 +249,16 @@ def parse_lead_date(date_str):
             continue
     return None
 
+
+def is_within_sending_window():
+    import zoneinfo
+    uk=datetime.datetime.now(zoneinfo.ZoneInfo("Europe/London"))
+    wd=uk.weekday()
+    t=uk.hour*60+uk.minute
+    if wd==6: return False
+    close={0:1110,1:1110,2:1110,3:1110,4:930,5:810}.get(wd,0)
+    return 600<=t<=close
+
 def process_sequences(service):
     log.info("─── Processing sequences ───")
     now      = datetime.datetime.now()
@@ -291,6 +301,9 @@ def process_sequences(service):
         due_at   = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
 
         if now >= due_at:
+            if current_step > 0 and not is_within_sending_window():
+                log.debug(f"{tl_ref}: outside sending window")
+                continue
             if send_wati_template(lead["phone"], next_msg["template"], lead["first_name"]):
                 new_step   = current_step + 1
                 new_status = "completed" if new_step >= len(sequence) else "active"
