@@ -1,5 +1,8 @@
 """
-WATI WhatsApp Sequence Automation — Separate Service
+WATI WhatsApp Sequence Automation
+Reads leads from Google Sheet (Sheet1), sends templated WhatsApp messages
+via WATI API on a timed schedule, tracks progress in a 'WATI Tracking' tab,
+and receives webhooks when clients reply.
 """
 
 import os
@@ -20,35 +23,56 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+# ─────────────────────────────────────────────
+# Config & Logging
+# ─────────────────────────────────────────────
+
 load_dotenv()
 
+# Decode Google credentials from base64 env vars (Railway deployment)
+import base64 as _b64
 _creds_b64 = os.getenv('GOOGLE_CREDENTIALS_B64')
 _token_b64  = os.getenv('GOOGLE_TOKEN_B64')
 if _creds_b64:
     with open('credentials.json', 'wb') as _f:
-        _f.write(base64.b64decode(_creds_b64))
+        _f.write(_b64.b64decode(_creds_b64))
 if _token_b64:
     with open('token.json', 'wb') as _f:
-        _f.write(base64.b64decode(_token_b64))
+        _f.write(_b64.b64decode(_token_b64))
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("wati_sequence.log", encoding="utf-8")],
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("wati_sequence.log", encoding="utf-8"),
+    ],
 )
 log = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# Environment Variables
+# ─────────────────────────────────────────────
 
 SPREADSHEET_ID   = os.getenv("SPREADSHEET_ID")
 SHEET_NAME       = os.getenv("SHEET_NAME", "Sheet1")
 TRACKING_SHEET   = "WATI Tracking"
-WATI_API_URL     = os.getenv("WATI_API_URL")
-WATI_TOKEN       = os.getenv("WATI_TOKEN")
-POLL_INTERVAL    = int(os.getenv("WATI_POLL_INTERVAL", "300"))
+WATI_API_URL     = os.getenv("WATI_API_URL")       # e.g. https://eu-api.wati.io/602557
+WATI_TOKEN       = os.getenv("WATI_TOKEN")         # Bearer token (without "Bearer " prefix)
+POLL_INTERVAL    = int(os.getenv("WATI_POLL_INTERVAL", "300"))  # 5 minutes
 WEBHOOK_PORT     = int(os.getenv("WEBHOOK_PORT", "8080"))
+
 CREDENTIALS_FILE = os.getenv("CREDENTIALS_FILE", "credentials.json")
 TOKEN_FILE       = os.getenv("TOKEN_FILE", "token.json")
-SCOPES           = ["https://www.googleapis.com/auth/spreadsheets"]
 
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# ─────────────────────────────────────────────
+# Sequence Definitions
+# ─────────────────────────────────────────────
+
+# Hours after lead creation to send each message
+# Message 1 is sent immediately (0 hours)
 UKDT_SEQUENCE = [
     {"step": 1, "template": "ukdt_nc1", "delay_hours": 0},
     {"step": 2, "template": "ukdt_nc2", "delay_hours": 24},
@@ -70,9 +94,14 @@ BST_SEQUENCE = [
     {"step": 8, "template": "bst_nc8",  "delay_hours": 288},
 ]
 
-STOPPED_STATUSES = {"replied", "completed", "opted out", "converted", "do not contact", "callback", "interested"}
+# Statuses that mean the sequence should NOT run
+STOPPED_STATUSES = {"replied", "completed", "opted out", "converted", "do not contact"}
 
-def get_google_credentials():
+# ─────────────────────────────────────────────
+# Google Auth
+# ─────────────────────────────────────────────
+
+def get_google_credentials() -> Credentials:
     creds = None
     if Path(TOKEN_FILE).exists():
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
@@ -86,7 +115,15 @@ def get_google_credentials():
             f.write(creds.to_json())
     return creds
 
-def format_phone(raw):
+# ─────────────────────────────────────────────
+# Phone Number Formatting
+# ─────────────────────────────────────────────
+
+def format_phone(raw: str) -> str:
+    """
+    Convert UK phone numbers to international format for WATI.
+    07956766809 → 447956766809
+    """
     digits = re.sub(r'\D', '', str(raw))
     if digits.startswith('07') and len(digits) == 11:
         return '44' + digits[1:]
@@ -94,16 +131,24 @@ def format_phone(raw):
         return digits
     return digits
 
+# ─────────────────────────────────────────────
+# Google Sheets Helpers
+# ─────────────────────────────────────────────
+
 def ensure_tracking_sheet(service):
+    """Create the WATI Tracking tab if it doesn't exist."""
     meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
     tabs = [s['properties']['title'] for s in meta.get('sheets', [])]
+
     if TRACKING_SHEET not in tabs:
         log.info(f"Creating '{TRACKING_SHEET}' tab...")
         service.spreadsheets().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
             body={"requests": [{"addSheet": {"properties": {"title": TRACKING_SHEET}}}]}
         ).execute()
-        headers = [["TL-REF", "Phone", "Campaign", "First Name", "Lead Date", "Current Step", "Last Sent", "Status", "Replied At"]]
+        # Write header
+        headers = [["TL-REF", "Phone", "Campaign", "First Name", "Lead Date",
+                    "Current Step", "Last Sent", "Status", "Replied At"]]
         service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
             range=f"'{TRACKING_SHEET}'!A1",
@@ -113,41 +158,51 @@ def ensure_tracking_sheet(service):
         ).execute()
         log.info("Tracking sheet created.")
 
-def get_all_leads(service):
+
+def get_all_leads(service) -> list[dict]:
+    """Read all rows from Sheet1."""
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f"'{SHEET_NAME}'!A:F"
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{SHEET_NAME}'!A:F"
     ).execute()
     rows = result.get('values', [])
     if len(rows) < 2:
         return []
+
     leads = []
-    for i, row in enumerate(rows[1:], start=2):
+    for i, row in enumerate(rows[1:], start=2):  # skip header
         if len(row) < 4:
             continue
         leads.append({
             "row": i,
-            "date":       row[0] if len(row) > 0 else "",
-            "tl_ref":     row[1] if len(row) > 1 else "",
-            "first_name": row[2] if len(row) > 2 else "",
-            "phone":      row[3] if len(row) > 3 else "",
-            "campaign":   row[4] if len(row) > 4 else "",
-            "status":     row[5] if len(row) > 5 else "No contact",
+            "date":        row[0] if len(row) > 0 else "",
+            "tl_ref":      row[1] if len(row) > 1 else "",
+            "first_name":  row[2] if len(row) > 2 else "",
+            "phone":       row[3] if len(row) > 3 else "",
+            "campaign":    row[4] if len(row) > 4 else "",
+            "status":      row[5] if len(row) > 5 else "No contact",
         })
     return leads
 
-def get_tracking_data(service):
+
+def get_tracking_data(service) -> dict:
+    """
+    Read WATI Tracking sheet and return a dict keyed by TL-REF.
+    """
     try:
         result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range=f"'{TRACKING_SHEET}'!A:I"
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"'{TRACKING_SHEET}'!A:I"
         ).execute()
         rows = result.get('values', [])
         if len(rows) < 2:
             return {}
+
         tracking = {}
         for i, row in enumerate(rows[1:], start=2):
             if not row:
                 continue
-            tl_ref = row[0].strip() if row else ""
+            tl_ref = row[0] if len(row) > 0 else ""
             if not tl_ref:
                 continue
             tracking[tl_ref] = {
@@ -157,19 +212,30 @@ def get_tracking_data(service):
                 "campaign":     row[2] if len(row) > 2 else "",
                 "first_name":   row[3] if len(row) > 3 else "",
                 "lead_date":    row[4] if len(row) > 4 else "",
-                "current_step": int(row[5]) if len(row) > 5 and str(row[5]).isdigit() else 0,
+                "current_step": int(row[5]) if len(row) > 5 and row[5].isdigit() else 0,
                 "last_sent":    row[6] if len(row) > 6 else "",
                 "status":       row[7] if len(row) > 7 else "active",
                 "replied_at":   row[8] if len(row) > 8 else "",
             }
         return tracking
     except Exception as e:
-        log.error(f"Failed to read tracking: {e}")
+        log.error(f"Failed to read tracking sheet: {e}")
         return {}
 
-def add_to_tracking(service, lead):
-    row = [lead["tl_ref"], lead["phone"], lead["campaign"], lead["first_name"],
-           lead["date"], "0", "", "active", ""]
+
+def add_to_tracking(service, lead: dict):
+    """Add a new lead to the tracking sheet."""
+    row = [
+        lead["tl_ref"],
+        lead["phone"],
+        lead["campaign"],
+        lead["first_name"],
+        lead["date"],
+        "0",          # current_step
+        "",           # last_sent
+        "active",     # status
+        "",           # replied_at
+    ]
     service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{TRACKING_SHEET}'!A1",
@@ -177,9 +243,11 @@ def add_to_tracking(service, lead):
         insertDataOption="INSERT_ROWS",
         body={"values": [row]}
     ).execute()
-    log.info(f"Added {lead['tl_ref']} to tracking.")
+    log.info(f"Added {lead['tl_ref']} to tracking sheet.")
 
-def update_tracking_row(service, row_num, step, last_sent, status="active", replied_at=""):
+
+def update_tracking_row(service, row_num: int, step: int, last_sent: str, status: str = "active", replied_at: str = ""):
+    """Update a lead's tracking row after sending a message."""
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{TRACKING_SHEET}'!F{row_num}:I{row_num}",
@@ -187,21 +255,36 @@ def update_tracking_row(service, row_num, step, last_sent, status="active", repl
         body={"values": [[str(step), last_sent, status, replied_at]]}
     ).execute()
 
-def mark_replied_by_phone(service, phone):
+
+def mark_replied_by_phone(service, phone: str):
+    """
+    Find a lead by phone number in tracking sheet and mark as replied.
+    Called when WATI webhook fires.
+    """
     tracking = get_tracking_data(service)
     formatted = format_phone(phone)
+
     for tl_ref, data in tracking.items():
         if format_phone(data["phone"]) == formatted:
-            if data["status"].lower() == "replied":
-                return
             replied_at = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
-            update_tracking_row(service, data["row"], data["current_step"], data["last_sent"], "replied", replied_at)
+            update_tracking_row(
+                service, data["row"],
+                data["current_step"],
+                data["last_sent"],
+                status="replied",
+                replied_at=replied_at
+            )
+            # Also update Status in Sheet1
             update_sheet1_status(service, phone, "Replied")
             log.info(f"Marked {tl_ref} as replied at {replied_at}")
-            return
-    log.warning(f"No lead found for phone {phone}")
+            return True
 
-def update_sheet1_status(service, phone, status):
+    log.warning(f"Could not find lead with phone {phone} in tracking sheet.")
+    return False
+
+
+def update_sheet1_status(service, phone: str, status: str):
+    """Update the Status column in Sheet1 for a given phone number."""
     leads = get_all_leads(service)
     formatted = format_phone(phone)
     for lead in leads:
@@ -212,37 +295,61 @@ def update_sheet1_status(service, phone, status):
                 valueInputOption="RAW",
                 body={"values": [[status]]}
             ).execute()
-            log.info(f"Sheet1 row {lead['row']} status → '{status}'")
+            log.info(f"Updated Sheet1 status for row {lead['row']} to '{status}'")
             return
 
-def send_wati_template(phone, template_name, first_name):
+
+# ─────────────────────────────────────────────
+# WATI API
+# ─────────────────────────────────────────────
+
+def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
+    """
+    Send a WhatsApp template message via WATI API.
+    Returns True on success.
+    """
     formatted_phone = format_phone(phone)
     url = f"{WATI_API_URL}/api/v1/sendTemplateMessage/{formatted_phone}"
-    headers = {"Authorization": f"Bearer {WATI_TOKEN}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {WATI_TOKEN}",
+        "Content-Type": "application/json"
+    }
     payload = {
         "template_name": template_name,
-        "broadcast_name": f"seq_{template_name}_{formatted_phone[-4:]}",
-        "parameters": [{"name": "first_name", "value": first_name}]
+        "broadcast_name": f"sequence_{template_name}",
+        "parameters": [
+            {"name": "first_name", "value": first_name}
+        ]
     }
+
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=30)
-        if r.status_code in (200, 201):
-            log.info(f"Sent {template_name} to {formatted_phone} ({first_name})")
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        if response.status_code in (200, 201):
+            log.info(f"✓ Sent {template_name} to {formatted_phone} ({first_name})")
             return True
         else:
-            log.error(f"WATI {r.status_code} for {formatted_phone}: {r.text}")
+            log.error(f"WATI API error {response.status_code}: {response.text}")
             return False
     except Exception as e:
-        log.error(f"WATI request failed: {e}")
+        log.error(f"WATI request failed for {formatted_phone}: {e}")
         return False
 
-def get_sequence(campaign):
-    if "BST" in campaign.upper():
+
+# ─────────────────────────────────────────────
+# Sequence Logic
+# ─────────────────────────────────────────────
+
+def get_sequence_for_campaign(campaign: str) -> list:
+    """Return the correct template sequence based on campaign."""
+    c = campaign.upper()
+    if "BST" in c:
         return BST_SEQUENCE
     return UKDT_SEQUENCE
 
-def parse_lead_date(date_str):
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"):
+
+def parse_lead_date(date_str: str) -> datetime.datetime | None:
+    """Parse DD/MM/YYYY date string."""
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
         try:
             return datetime.datetime.strptime(date_str.strip(), fmt)
         except ValueError:
@@ -250,122 +357,167 @@ def parse_lead_date(date_str):
     return None
 
 
-def is_within_sending_window():
-    import zoneinfo
-    uk=datetime.datetime.now(zoneinfo.ZoneInfo("Europe/London"))
-    wd=uk.weekday()
-    t=uk.hour*60+uk.minute
-    if wd==6: return False
-    close={0:1110,1:1110,2:1110,3:1110,4:930,5:810}.get(wd,0)
-    return 600<=t<=close
-
 def process_sequences(service):
+    """
+    Main sequence processing loop:
+    1. Read all leads from Sheet1
+    2. Add new leads to tracking
+    3. For each active lead, check if next message is due
+    4. Send if due, update tracking
+    """
     log.info("─── Processing sequences ───")
-    now      = datetime.datetime.now()
+    now = datetime.datetime.now()
+
     leads    = get_all_leads(service)
     tracking = get_tracking_data(service)
-    log.info(f"{len(leads)} leads | {len(tracking)} in tracking")
+
+    log.info(f"Found {len(leads)} leads in sheet, {len(tracking)} in tracking.")
 
     for lead in leads:
-        tl_ref   = lead["tl_ref"].strip()
-        campaign = lead["campaign"].strip()
+        tl_ref   = lead["tl_ref"]
+        campaign = lead["campaign"]
         status   = lead["status"].lower().strip()
 
-        if not lead["phone"] or not tl_ref:
-            continue
+        # Skip if lead status indicates they've responded
         if any(s in status for s in STOPPED_STATUSES):
             continue
 
+        # Skip leads with no phone or ref
+        if not lead["phone"] or not tl_ref:
+            continue
+
+        # Add to tracking if not already there
         if tl_ref not in tracking:
             add_to_tracking(service, lead)
-            tracking = get_tracking_data(service)
+            tracking = get_tracking_data(service)  # refresh
 
         track = tracking.get(tl_ref)
         if not track:
             continue
-        if track["status"].lower() in ("replied", "completed", "opted out"):
+
+        # Skip if already marked replied in tracking
+        if track["status"].lower() == "replied":
             continue
 
-        sequence     = get_sequence(campaign)
+        # Get sequence for this campaign
+        sequence = get_sequence_for_campaign(campaign)
         current_step = track["current_step"]
 
+        # All messages sent
         if current_step >= len(sequence):
             continue
 
+        # Parse lead date
         lead_date = parse_lead_date(lead["date"])
         if not lead_date:
-            log.warning(f"Bad date for {tl_ref}: '{lead['date']}'")
+            log.warning(f"Could not parse date for {tl_ref}: '{lead['date']}'")
             continue
 
+        # Check next message due
         next_msg = sequence[current_step]
-        due_at   = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
+        due_at = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
 
         if now >= due_at:
-            if current_step > 0 and not is_within_sending_window():
-                log.debug(f"{tl_ref}: outside sending window")
-                continue
-            if send_wati_template(lead["phone"], next_msg["template"], lead["first_name"]):
-                new_step   = current_step + 1
-                new_status = "completed" if new_step >= len(sequence) else "active"
-                update_tracking_row(service, track["row"], new_step,
-                                    now.strftime("%d/%m/%Y %H:%M"), new_status)
-                log.info(f"{tl_ref}: step {new_step}/{len(sequence)} sent")
+            # Send the message
+            success = send_wati_template(
+                lead["phone"],
+                next_msg["template"],
+                lead["first_name"]
+            )
+            if success:
+                new_step  = current_step + 1
+                last_sent = now.strftime("%d/%m/%Y %H:%M")
+                status_val = "completed" if new_step >= len(sequence) else "active"
+                update_tracking_row(service, track["row"], new_step, last_sent, status_val)
+                log.info(f"{tl_ref}: step {new_step}/{len(sequence)} sent ({next_msg['template']})")
         else:
-            hrs = (due_at - now).total_seconds() / 3600
-            log.debug(f"{tl_ref}: next in {hrs:.1f}h ({next_msg['template']})")
+            hours_remaining = (due_at - now).total_seconds() / 3600
+            log.debug(f"{tl_ref}: next message in {hours_remaining:.1f}h ({next_msg['template']})")
 
-    log.info("─── Done ───")
+    log.info("─── Sequence processing complete ───")
 
-sheets_service_global = None
+
+# ─────────────────────────────────────────────
+# Webhook Server (receives WATI reply events)
+# ─────────────────────────────────────────────
+
+sheets_service_global = None  # Set in main()
+
 
 class WatiWebhookHandler(BaseHTTPRequestHandler):
+    """
+    Handles incoming POST requests from WATI when a client replies.
+    WATI sends a JSON payload with the contact's phone number.
+    """
+
     def do_POST(self):
         try:
             length  = int(self.headers.get('Content-Length', 0))
             body    = self.rfile.read(length)
             payload = json.loads(body)
-            log.info(f"Webhook: {json.dumps(payload)[:200]}")
-            phone = (payload.get("waId") or payload.get("phone") or
-                     payload.get("from") or
-                     (payload.get("contact") or {}).get("phone", "") or
-                     (payload.get("contact") or {}).get("wa_id", ""))
+
+            log.info(f"Webhook received: {json.dumps(payload)[:200]}")
+
+            # WATI sends waId (phone number) in the payload
+            phone = (
+                payload.get("waId") or
+                payload.get("phone") or
+                payload.get("from") or
+                payload.get("contact", {}).get("phone", "")
+            )
+
             if phone and sheets_service_global:
-                mark_replied_by_phone(sheets_service_global, str(phone))
+                mark_replied_by_phone(sheets_service_global, phone)
+
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
+
         except Exception as e:
             log.error(f"Webhook error: {e}")
             self.send_response(500)
             self.end_headers()
 
     def do_GET(self):
+        # Health check endpoint
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"WATI Sequence Bot running.")
+        self.wfile.write(b"WATI Sequence Bot is running.")
 
     def log_message(self, format, *args):
-        pass
+        pass  # Suppress default HTTP server logs
+
 
 def start_webhook_server():
+    """Start the webhook HTTP server in a background thread."""
     server = HTTPServer(('0.0.0.0', WEBHOOK_PORT), WatiWebhookHandler)
-    log.info(f"Webhook server on port {WEBHOOK_PORT}")
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log.info(f"Webhook server listening on port {WEBHOOK_PORT}")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+# ─────────────────────────────────────────────
+# Entry Point
+# ─────────────────────────────────────────────
 
 def main():
     global sheets_service_global
+
     if not SPREADSHEET_ID:
-        raise EnvironmentError("SPREADSHEET_ID not set")
+        raise EnvironmentError("SPREADSHEET_ID is not set")
     if not WATI_API_URL:
-        raise EnvironmentError("WATI_API_URL not set")
+        raise EnvironmentError("WATI_API_URL is not set")
     if not WATI_TOKEN:
-        raise EnvironmentError("WATI_TOKEN not set")
+        raise EnvironmentError("WATI_TOKEN is not set")
 
     log.info("Starting WATI Sequence Automation...")
-    log.info(f"Sheet: {SHEET_NAME} | WATI: {WATI_API_URL} | Poll: {POLL_INTERVAL}s")
+    log.info(f"WATI endpoint: {WATI_API_URL}")
+    log.info(f"Poll interval: {POLL_INTERVAL}s")
 
     creds = get_google_credentials()
     sheets_service_global = build("sheets", "v4", credentials=creds)
+
     ensure_tracking_sheet(sheets_service_global)
     start_webhook_server()
 
@@ -373,9 +525,11 @@ def main():
         try:
             process_sequences(sheets_service_global)
         except Exception as e:
-            log.exception(f"Sequence error: {e}")
-        log.info(f"Sleeping {POLL_INTERVAL}s...")
+            log.exception(f"Error in sequence processing: {e}")
+
+        log.info(f"Sleeping {POLL_INTERVAL}s before next check...")
         time.sleep(POLL_INTERVAL)
+
 
 if __name__ == "__main__":
     main()
