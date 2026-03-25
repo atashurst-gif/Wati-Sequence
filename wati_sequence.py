@@ -9,6 +9,7 @@ import os
 import re
 import json
 import time
+import gc
 import base64
 import logging
 import datetime
@@ -602,7 +603,7 @@ def main():
     log.info(f"Poll interval: {POLL_INTERVAL}s")
 
     creds = get_google_credentials()
-    sheets_service_global = build("sheets", "v4", credentials=creds)
+    sheets_service_global = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
     ensure_tracking_sheet(sheets_service_global)
     start_webhook_server()
@@ -613,6 +614,7 @@ def main():
         except Exception as e:
             log.exception(f"Error in sequence processing: {e}")
 
+        gc.collect()
         log.info(f"Sleeping {POLL_INTERVAL}s before next check...")
         time.sleep(POLL_INTERVAL)
 
