@@ -49,10 +49,7 @@ if _token_b64:
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("wati_sequence.log", encoding="utf-8"),
-    ],
+
 )
 log = logging.getLogger(__name__)
 
