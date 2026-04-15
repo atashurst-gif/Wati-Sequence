@@ -366,9 +366,9 @@ def mark_replied_by_phone(service, phone: str):
                 return
             replied_at = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
             update_tracking_row(service, data["row"], data["current_step"],
-                                data["last_sent"], "replied", replied_at)
-            update_sheet1_status(service, phone, "Replied")
-            log.info(f"Marked {tl_ref} as replied at {replied_at}")
+                                data["last_sent"], "contacted", replied_at)
+            update_sheet1_status(service, phone, "Contacted")
+            log.info(f"Marked {tl_ref} as Contacted at {replied_at}")
             return
     log.warning(f"No lead found for phone {phone}")
 
@@ -484,8 +484,35 @@ def process_sequences(service):
         if not track:
             continue
 
-        # Skip if tracking says replied/completed
-        if track["status"].lower() in ("replied", "completed", "opted out"):
+        # Get Sheet1 status for this lead
+        sheet1_status = lead["status"].lower().strip()
+
+        # Permanently stop if status indicates case is progressed
+        if any(s in sheet1_status for s in STOPPED_STATUSES):
+            if track["status"] != "stopped":
+                update_tracking_row(service, track["row"], track["current_step"],
+                                    track["last_sent"], "stopped")
+            continue
+
+        # Handle paused (Contacted) status — resume after 24 hours
+        if any(s in sheet1_status for s in PAUSE_STATUSES):
+            replied_at_str = track.get("replied_at", "")
+            if replied_at_str:
+                try:
+                    replied_at = datetime.datetime.strptime(replied_at_str, "%d/%m/%Y %H:%M")
+                    hours_since_reply = (now - replied_at).total_seconds() / 3600
+                    if hours_since_reply < RESUME_AFTER_HOURS:
+                        log.debug(f"{tl_ref}: paused — {RESUME_AFTER_HOURS - hours_since_reply:.1f}h until resume")
+                        continue
+                    else:
+                        log.info(f"{tl_ref}: 24h passed since reply, resuming sequence")
+                except ValueError:
+                    pass
+            else:
+                continue  # No replied_at timestamp yet, stay paused
+
+        # Skip if tracking says permanently stopped
+        if track["status"].lower() in ("stopped", "completed"):
             continue
 
         sequence     = get_sequence(campaign)
@@ -519,11 +546,6 @@ def process_sequences(service):
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
 
     log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent ───")
-    try:
-        import requests
-        requests.get("https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187", timeout=5)
-    except Exception:
-        pass
 
 # ─────────────────────────────────────────────
 # Webhook Server
