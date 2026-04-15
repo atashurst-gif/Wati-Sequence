@@ -519,6 +519,11 @@ def process_sequences(service):
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
 
     log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent ───")
+    try:
+        import requests
+        requests.get("https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187", timeout=5)
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────
 # Webhook Server
