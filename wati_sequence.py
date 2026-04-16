@@ -397,7 +397,7 @@ def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     formatted_phone = format_phone(phone)
     url = f"{WATI_API_URL}/api/v1/sendTemplateMessage/{formatted_phone}"
     headers = {
-        "Authorization": f"Bearer {WATI_TOKEN}",
+        "Authorization": WATI_TOKEN,
         "Content-Type": "application/json"
     }
     payload = {
