@@ -114,6 +114,8 @@ STOPPED_STATUSES = {
     "do not contact", "callback", "interested"
 }
 
+PAUSE_STATUSES = {"contacted"}
+
 # ─────────────────────────────────────────────
 # Sending Window Logic
 # ─────────────────────────────────────────────
