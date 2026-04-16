@@ -109,6 +109,8 @@ BST_SEQUENCE = [
     {"step": 8, "template": "bst_nc8",  "delay_hours": 288},
 ]
 
+PAUSE_STATUSES = {"contacted"}
+
 STOPPED_STATUSES = {
     "replied", "completed", "opted out", "converted",
     "do not contact", "callback", "interested"
