@@ -109,8 +109,6 @@ BST_SEQUENCE = [
     {"step": 8, "template": "bst_nc8",  "delay_hours": 288},
 ]
 
-PAUSE_STATUSES = {"contacted"}
-
 STOPPED_STATUSES = {
     "replied", "completed", "opted out", "converted",
     "do not contact", "callback", "interested"
@@ -393,11 +391,36 @@ def update_sheet1_status(service, phone: str, status: str):
 # WATI API
 # ─────────────────────────────────────────────
 
+def create_wati_contact(phone: str, first_name: str) -> bool:
+    """Add contact to WATI before sending. Returns True if created or already exists."""
+    formatted_phone = format_phone(phone)
+    url = f"{WATI_API_URL}/api/v1/addContact/{formatted_phone}"
+    headers = {
+        "Authorization": f"Bearer {WATI_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"name": first_name}
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
+        if r.status_code in (200, 201):
+            log.info(f"✓ Contact created in WATI: {formatted_phone} ({first_name})")
+            return True
+        elif r.status_code == 400 and "already exists" in r.text.lower():
+            log.info(f"Contact already exists in WATI: {formatted_phone}")
+            return True
+        else:
+            log.error(f"WATI create contact {r.status_code} for {formatted_phone}: {r.text}")
+            return False
+    except Exception as e:
+        log.error(f"WATI create contact failed for {formatted_phone}: {e}")
+        return False
+
+
 def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     formatted_phone = format_phone(phone)
     url = f"{WATI_API_URL}/api/v1/sendTemplateMessage/{formatted_phone}"
     headers = {
-        "Authorization": WATI_TOKEN,
+        "Authorization": f"Bearer {WATI_TOKEN}",
         "Content-Type": "application/json"
     }
     payload = {
@@ -536,6 +559,10 @@ def process_sequences(service):
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
                 continue
 
+            # Always create contact in WATI before sending W1
+            if current_step == 0:
+                create_wati_contact(lead["phone"], lead["first_name"])
+
             if send_wati_template(lead["phone"], next_msg["template"], lead["first_name"]):
                 new_step   = current_step + 1
                 new_status = "completed" if new_step >= len(sequence) else "active"
@@ -548,11 +575,6 @@ def process_sequences(service):
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
 
     log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent ───")
-    try:
-        import requests as _r
-        _r.get("https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187", timeout=5)
-    except Exception:
-        pass
 
 # ─────────────────────────────────────────────
 # Webhook Server
