@@ -84,6 +84,12 @@ ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o"}
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
+# Hours to wait after a client reply before resuming sequence
+RESUME_AFTER_HOURS = 24
+
+# Service account file path (used as fallback if env var not set)
+SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
+
 # ─────────────────────────────────────────────
 # Sequence Definitions
 # ─────────────────────────────────────────────
