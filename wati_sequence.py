@@ -638,15 +638,40 @@ def start_webhook_server():
 # Entry Point
 # ─────────────────────────────────────────────
 
+def validate_config():
+    """Check all required constants and env vars exist at startup. Crashes with a clear message if anything is missing."""
+    required_env = {
+        "SPREADSHEET_ID": SPREADSHEET_ID,
+        "WATI_API_URL": WATI_API_URL,
+        "WATI_TOKEN": WATI_TOKEN,
+    }
+    required_constants = {
+        "RESUME_AFTER_HOURS": RESUME_AFTER_HOURS,
+        "PAUSE_STATUSES": PAUSE_STATUSES,
+        "STOPPED_STATUSES": STOPPED_STATUSES,
+        "ALLOWED_CAMPAIGNS": ALLOWED_CAMPAIGNS,
+        "CUTOFF_DATE": CUTOFF_DATE,
+        "UKDT_SEQUENCE": UKDT_SEQUENCE,
+        "BST_SEQUENCE": BST_SEQUENCE,
+    }
+    errors = []
+    for name, val in required_env.items():
+        if not val:
+            errors.append(f"  ✗ env var {name} is not set")
+    for name, val in required_constants.items():
+        if val is None:
+            errors.append(f"  ✗ constant {name} is not defined")
+    if errors:
+        msg = "STARTUP VALIDATION FAILED:\n" + "\n".join(errors)
+        send_alert_email("WATI Bot — Startup Failed", msg)
+        raise EnvironmentError(msg)
+    log.info("✓ Startup validation passed — all constants and env vars present")
+
+
 def main():
     global sheets_service_global
 
-    if not SPREADSHEET_ID:
-        raise EnvironmentError("SPREADSHEET_ID not set")
-    if not WATI_API_URL:
-        raise EnvironmentError("WATI_API_URL not set")
-    if not WATI_TOKEN:
-        raise EnvironmentError("WATI_TOKEN not set")
+    validate_config()
 
     log.info("Starting WATI Sequence Automation...")
     log.info(f"Cutoff date: {CUTOFF_DATE.strftime('%d/%m/%Y')} (leads before this are skipped)")
