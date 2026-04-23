@@ -33,6 +33,39 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 # ─────────────────────────────────────────────
+# Global 429 backoff — patches ALL Sheets API .execute() calls automatically
+# ─────────────────────────────────────────────
+
+def _install_sheets_backoff():
+    """Monkey-patch googleapiclient HttpRequest.execute with exponential backoff."""
+    import time as _time
+    from googleapiclient import http as _ghttp
+    from googleapiclient.errors import HttpError as _HttpError
+
+    _orig = _ghttp.HttpRequest.execute
+
+    def _execute_with_backoff(self, *args, **kwargs):
+        delay = 2
+        max_retries = 6
+        for attempt in range(max_retries):
+            try:
+                return _orig(self, *args, **kwargs)
+            except _HttpError as e:
+                status = int(e.resp.status)
+                if status in (429, 500, 502, 503) and attempt < max_retries - 1:
+                    log.warning(f"Sheets API {status} — retrying in {delay}s (attempt {attempt+1}/{max_retries})")
+                    _time.sleep(delay)
+                    delay = min(delay * 2, 120)
+                else:
+                    log.error(f"Sheets API {status} failed after {attempt+1} attempts")
+                    raise
+
+    _ghttp.HttpRequest.execute = _execute_with_backoff
+    log.info("✓ Sheets API backoff patch installed")
+
+
+
+# ─────────────────────────────────────────────
 # Startup — decode credentials from env
 # ─────────────────────────────────────────────
 
@@ -83,6 +116,7 @@ CUTOFF_DATE = datetime.datetime(2026, 4, 15)
 ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o"}
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+HEALTHCHECK_URL = "https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187"
 
 # Hours to wait after a client reply before resuming sequence
 RESUME_AFTER_HOURS = 24
@@ -588,6 +622,10 @@ def process_sequences(service):
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
 
     log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent ───")
+    try:
+        requests.get(HEALTHCHECK_URL, timeout=5)
+    except Exception:
+        pass  # healthcheck ping failure should never crash the service
 
 # ─────────────────────────────────────────────
 # Webhook Server
@@ -666,6 +704,7 @@ def validate_config():
         send_alert_email("WATI Bot — Startup Failed", msg)
         raise EnvironmentError(msg)
     log.info("✓ Startup validation passed — all constants and env vars present")
+    _install_sheets_backoff()
 
 
 def main():
