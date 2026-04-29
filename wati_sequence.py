@@ -150,8 +150,8 @@ BST_SEQUENCE = [
 ]
 
 STOPPED_STATUSES = {
-    "replied", "completed", "opted out", "converted",
-    "do not contact", "callback", "interested"
+    "callback set", "lead passed", "agreed", "verified",
+    "moc set", "moc approved", "dnc", "callback missed"
 }
 
 PAUSE_STATUSES = {"contacted"}
@@ -433,6 +433,27 @@ def update_sheet1_status(service, phone: str, status: str):
 # WATI API
 # ─────────────────────────────────────────────
 
+def update_wati_contact_stage(phone: str, stage: str) -> bool:
+    """Update a contact's stage in WATI."""
+    formatted_phone = format_phone(phone)
+    url = f"{WATI_API_URL}/api/v1/updateContact/{formatted_phone}"
+    headers = {
+        "Authorization": f"Bearer {WATI_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"customParams": [{"name": "stage", "value": stage}]}
+    try:
+        r = requests.patch(url, json=payload, headers=headers, timeout=30)
+        if r.status_code in (200, 201):
+            log.info(f"WATI stage updated to '{stage}' for {formatted_phone}")
+            return True
+        else:
+            log.warning(f"WATI stage update failed {r.status_code} for {formatted_phone}: {r.text[:200]}")
+            return False
+    except Exception as e:
+        log.warning(f"WATI stage update error for {formatted_phone}: {e}")
+        return False
+
 def create_wati_contact(phone: str, first_name: str) -> bool:
     """Add contact to WATI before sending. Returns True if created or already exists."""
     formatted_phone = format_phone(phone)
@@ -578,6 +599,8 @@ def process_sequences(service):
                         continue
                     else:
                         log.info(f"{tl_ref}: 24h passed since reply, resuming sequence")
+                        update_sheet1_status(service, lead["phone"], "Contacted Resumed")
+                        update_wati_contact_stage(lead["phone"], "Contacted Resumed")
                 except ValueError:
                     pass
             else:
