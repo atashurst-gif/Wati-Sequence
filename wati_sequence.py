@@ -434,16 +434,16 @@ def update_sheet1_status(service, phone: str, status: str):
 # ─────────────────────────────────────────────
 
 def update_wati_contact_stage(phone: str, stage: str) -> bool:
-    """Update a contact's stage in WATI."""
+    """Update a contact's lead status/stage in WATI."""
     formatted_phone = format_phone(phone)
-    url = f"{WATI_API_URL}/api/v1/updateContact/{formatted_phone}"
+    url = f"{WATI_API_URL}/api/v1/updateLeadStatus"
     headers = {
         "Authorization": f"Bearer {WATI_TOKEN}",
         "Content-Type": "application/json"
     }
-    payload = {"customParams": [{"name": "stage", "value": stage}]}
+    payload = {"phone": formatted_phone, "leadStatus": stage}
     try:
-        r = requests.patch(url, json=payload, headers=headers, timeout=30)
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
         if r.status_code in (200, 201):
             log.info(f"WATI stage updated to '{stage}' for {formatted_phone}")
             return True
@@ -620,7 +620,20 @@ def process_sequences(service):
             continue
 
         next_msg = sequence[current_step]
-        due_at   = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
+        # W1 is due immediately from lead_date
+        # W2+ are due delay_hours after the PREVIOUS message was sent
+        if current_step == 0:
+            due_at = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
+        else:
+            last_sent_str = track.get("last_sent", "")
+            if last_sent_str:
+                try:
+                    last_sent_dt = datetime.datetime.strptime(last_sent_str, "%d/%m/%Y %H:%M")
+                    due_at = last_sent_dt + datetime.timedelta(hours=next_msg["delay_hours"])
+                except ValueError:
+                    due_at = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
+            else:
+                due_at = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
 
         if now >= due_at:
             # W1 sends immediately always
