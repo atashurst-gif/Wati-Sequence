@@ -593,7 +593,7 @@ def process_sequences(service):
             continue
 
         # Handle paused (Contacted) status — resume after 24 hours
-        # If already resumed, skip pause logic entirely and continue sequence
+        # If already resumed, skip pause logic and continue sequence normally
         if sheet1_status == CONTACTED_RESUMED_STATUS:
             pass  # treat as normal active lead
         elif any(s in sheet1_status for s in PAUSE_STATUSES):
@@ -731,6 +731,7 @@ def validate_config():
         "RESUME_AFTER_HOURS": RESUME_AFTER_HOURS,
         "PAUSE_STATUSES": PAUSE_STATUSES,
         "STOPPED_STATUSES": STOPPED_STATUSES,
+        "CONTACTED_RESUMED_STATUS": CONTACTED_RESUMED_STATUS,
         "ALLOWED_CAMPAIGNS": ALLOWED_CAMPAIGNS,
         "CUTOFF_DATE": CUTOFF_DATE,
         "UKDT_SEQUENCE": UKDT_SEQUENCE,
