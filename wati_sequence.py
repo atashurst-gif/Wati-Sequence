@@ -151,7 +151,7 @@ BST_SEQUENCE = [
 
 STOPPED_STATUSES = {
     "callback set", "lead passed", "agreed", "verified",
-    "moc set", "moc approved", "dnc", "callback missed"
+    "moc set", "moc approved", "dnc", "dnq", "callback missed"
 }
 
 PAUSE_STATUSES = {"contacted"}
