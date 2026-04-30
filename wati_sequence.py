@@ -155,6 +155,7 @@ STOPPED_STATUSES = {
 }
 
 PAUSE_STATUSES = {"contacted"}
+CONTACTED_RESUMED_STATUS = "contacted resumed"
 
 # ─────────────────────────────────────────────
 # Sending Window Logic
@@ -434,18 +435,22 @@ def update_sheet1_status(service, phone: str, status: str):
 # ─────────────────────────────────────────────
 
 def update_wati_contact_stage(phone: str, stage: str) -> bool:
-    """Update a contact's lead status/stage in WATI."""
+    """Update a contact's lead stage in WATI using correct attributes endpoint."""
     formatted_phone = format_phone(phone)
-    url = f"{WATI_API_URL}/api/v1/updateLeadStatus"
+    url = f"{WATI_API_URL}/api/v1/updateContactAttributes/{formatted_phone}"
     headers = {
         "Authorization": f"Bearer {WATI_TOKEN}",
         "Content-Type": "application/json"
     }
-    payload = {"phone": formatted_phone, "leadStatus": stage}
+    payload = {
+        "customParams": [
+            {"name": "lead_stage", "value": stage}
+        ]
+    }
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=30)
         if r.status_code in (200, 201):
-            log.info(f"WATI stage updated to '{stage}' for {formatted_phone}")
+            log.info(f"WATI lead stage updated to '{stage}' for {formatted_phone}")
             return True
         else:
             log.warning(f"WATI stage update failed {r.status_code} for {formatted_phone}: {r.text[:200]}")
@@ -588,7 +593,10 @@ def process_sequences(service):
             continue
 
         # Handle paused (Contacted) status — resume after 24 hours
-        if any(s in sheet1_status for s in PAUSE_STATUSES):
+        # If already resumed, skip pause logic entirely and continue sequence
+        if sheet1_status == CONTACTED_RESUMED_STATUS:
+            pass  # treat as normal active lead
+        elif any(s in sheet1_status for s in PAUSE_STATUSES):
             replied_at_str = track.get("replied_at", "")
             if replied_at_str:
                 try:
