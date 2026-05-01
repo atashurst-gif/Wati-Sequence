@@ -473,12 +473,13 @@ def get_wati_lead_stage(phone: str) -> str:
         log.info(f"WATI getContacts response {r.status_code} for {formatted_phone}: {r.text[:300]}")
         if r.status_code == 200:
             data = r.json()
-            contacts = data.get("contact", {}).get("items", [])
+            # WATI returns contact_list at top level
+            contacts = data.get("contact_list", [])
             log.info(f"WATI contacts found: {len(contacts)} for {formatted_phone}")
             for contact in contacts:
-                wn = contact.get("whatsappNumber", "") or ""
+                wn = (contact.get("whatsappNumber") or contact.get("phone") or "").strip()
                 log.info(f"WATI contact whatsappNumber: {wn}")
-                if formatted_phone in wn:
+                if wn == formatted_phone:
                     for param in contact.get("customParams", []):
                         log.info(f"WATI param: {param}")
                         if param.get("name", "").lower() == "lead_stage":
