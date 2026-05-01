@@ -236,27 +236,20 @@ def send_alert_email(subject: str, body: str):
 # Google Auth
 # ─────────────────────────────────────────────
 
-def get_google_credentials() -> Credentials:
-    creds = None
-    if Path(TOKEN_FILE).exists():
-        try:
-            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-        except Exception as e:
-            log.error(f"Failed to load token.json: {e}")
-            creds = None
+def get_google_credentials():
+    """Authenticate using Service Account from env var — never expires."""
+    import json
+    import base64
+    from google.oauth2 import service_account
+    sa_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64", "")
+    if sa_b64:
+        padded = sa_b64 + "=" * (-len(sa_b64) % 4)
+        info = json.loads(base64.b64decode(padded).decode("utf-8"))
+        creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+        log.info("Service account credentials loaded successfully.")
+        return creds
+    raise EnvironmentError("GOOGLE_SERVICE_ACCOUNT_B64 not set")
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            log.info("Refreshing Google credentials...")
-            creds.refresh(Request())
-        else:
-            log.info("Starting OAuth2 flow...")
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(TOKEN_FILE, "w") as f:
-            f.write(creds.to_json())
-        log.info("Credentials saved.")
-    return creds
 
 # ─────────────────────────────────────────────
 # Phone Formatting
