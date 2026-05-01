@@ -467,27 +467,34 @@ def get_wati_lead_stage(phone: str) -> str:
     url = f"{WATI_API_URL}/api/v1/getContacts"
     headers = {"Authorization": f"Bearer {WATI_TOKEN}"}
     params = {"search": formatted_phone}
+    log.info(f"WATI stage lookup: {formatted_phone}")
     try:
         r = requests.get(url, headers=headers, params=params, timeout=30)
+        log.info(f"WATI getContacts response {r.status_code} for {formatted_phone}: {r.text[:300]}")
         if r.status_code == 200:
             data = r.json()
             contacts = data.get("contact", {}).get("items", [])
+            log.info(f"WATI contacts found: {len(contacts)} for {formatted_phone}")
             for contact in contacts:
-                # Match on phone number
-                if formatted_phone in (contact.get("whatsappNumber", "") or ""):
-                    # Check customParams for lead_stage
+                wn = contact.get("whatsappNumber", "") or ""
+                log.info(f"WATI contact whatsappNumber: {wn}")
+                if formatted_phone in wn:
                     for param in contact.get("customParams", []):
+                        log.info(f"WATI param: {param}")
                         if param.get("name", "").lower() == "lead_stage":
-                            return param.get("value", "").lower().strip()
-                    # Check direct field
+                            stage = param.get("value", "").lower().strip()
+                            log.info(f"WATI lead stage for {formatted_phone}: '{stage}'")
+                            return stage
                     stage = contact.get("leadStage") or contact.get("lead_stage", "")
+                    log.info(f"WATI direct stage for {formatted_phone}: '{stage}'")
                     return stage.lower().strip() if stage else ""
-            return ""  # Contact not found in results
+            log.info(f"WATI contact not found in results for {formatted_phone}")
+            return ""
         else:
-            log.debug(f"WATI getContacts {r.status_code} for {formatted_phone}")
+            log.warning(f"WATI getContacts {r.status_code} for {formatted_phone}")
             return ""
     except Exception as e:
-        log.debug(f"WATI getContacts error for {formatted_phone}: {e}")
+        log.warning(f"WATI getContacts error for {formatted_phone}: {e}")
         return ""
 
 
