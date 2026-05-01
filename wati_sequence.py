@@ -461,6 +461,32 @@ def update_wati_contact_stage(phone: str, stage: str) -> bool:
         log.warning(f"WATI stage update error for {formatted_phone}: {e}")
         return False
 
+def get_wati_lead_stage(phone: str) -> str:
+    """Fetch the current Lead Stage for a contact from WATI. Returns lowercase string or empty string on failure."""
+    formatted_phone = format_phone(phone)
+    url = f"{WATI_API_URL}/api/v1/getContact/{formatted_phone}"
+    headers = {"Authorization": f"Bearer {WATI_TOKEN}"}
+    try:
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            # Lead Stage is in Sales Attributes
+            contact = data.get("contact", data)
+            # Try customParams first
+            for param in contact.get("customParams", []):
+                if param.get("name", "").lower() == "lead_stage":
+                    return param.get("value", "").lower().strip()
+            # Try direct field
+            stage = contact.get("leadStage") or contact.get("lead_stage", "")
+            return stage.lower().strip() if stage else ""
+        else:
+            log.warning(f"WATI getContact {r.status_code} for {formatted_phone}")
+            return ""
+    except Exception as e:
+        log.warning(f"WATI getContact error for {formatted_phone}: {e}")
+        return ""
+
+
 def create_wati_contact(phone: str, first_name: str) -> bool:
     """Add contact to WATI before sending. Returns True if created or already exists."""
     formatted_phone = format_phone(phone)
@@ -584,21 +610,30 @@ def process_sequences(service):
         if not track:
             continue
 
-        # Get Sheet1 status for this lead
+        # ── Get WATI Lead Stage as source of truth ──
+        wati_stage = get_wati_lead_stage(lead["phone"])
+        # Fall back to Sheet1 status if WATI API fails
         sheet1_status = lead["status"].lower().strip()
+        effective_status = wati_stage if wati_stage else sheet1_status
 
-        # Permanently stop if status indicates case is progressed
-        if any(s in sheet1_status for s in STOPPED_STATUSES):
+        log.debug(f"{tl_ref}: WATI stage='{wati_stage}' sheet1='{sheet1_status}'")
+
+        # Always keep Sheet1 in sync with WATI stage
+        if wati_stage and wati_stage != sheet1_status:
+            update_sheet1_status(service, lead["phone"], wati_stage.title())
+
+        # Permanently stop if WATI stage indicates case is progressed
+        if any(s in effective_status for s in STOPPED_STATUSES):
             if track["status"] != "stopped":
                 update_tracking_row(service, track["row"], track["current_step"],
                                     track["last_sent"], "stopped")
+            log.info(f"{tl_ref}: stopped — WATI stage is '{effective_status}'")
             continue
 
         # Handle paused (Contacted) status — resume after 24 hours
-        # If already resumed, skip pause logic and continue sequence normally
-        if sheet1_status == CONTACTED_RESUMED_STATUS:
+        if effective_status == CONTACTED_RESUMED_STATUS:
             pass  # treat as normal active lead
-        elif any(s in sheet1_status for s in PAUSE_STATUSES):
+        elif any(s in effective_status for s in PAUSE_STATUSES):
             replied_at_str = track.get("replied_at", "")
             if replied_at_str:
                 try:
@@ -611,6 +646,8 @@ def process_sequences(service):
                         log.info(f"{tl_ref}: 24h passed since reply, resuming sequence")
                         update_sheet1_status(service, lead["phone"], "Contacted Resumed")
                         update_wati_contact_stage(lead["phone"], "Contacted Resumed")
+                        update_tracking_row(service, track["row"], track["current_step"],
+                                            track["last_sent"], "active")
                 except ValueError:
                     pass
             else:
