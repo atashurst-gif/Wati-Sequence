@@ -462,40 +462,35 @@ def update_wati_contact_stage(phone: str, stage: str) -> bool:
         return False
 
 def get_wati_lead_stage(phone: str) -> str:
-    """Fetch the current Lead Stage for a contact from WATI. Returns lowercase string or empty string on failure."""
+    """Fetch the current Lead Stage for a contact from WATI using direct contact lookup."""
     formatted_phone = format_phone(phone)
-    url = f"{WATI_API_URL}/api/v1/getContacts"
+    url = f"{WATI_API_URL}/api/v1/getContact/{formatted_phone}"
     headers = {"Authorization": f"Bearer {WATI_TOKEN}"}
-    params = {"search": formatted_phone}
     log.info(f"WATI stage lookup: {formatted_phone}")
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=30)
-        log.info(f"WATI getContacts response {r.status_code} for {formatted_phone}: {r.text[:300]}")
+        r = requests.get(url, headers=headers, timeout=30)
+        log.info(f"WATI getContact response {r.status_code} for {formatted_phone}: {r.text[:300]}")
         if r.status_code == 200:
             data = r.json()
-            # WATI returns contact_list at top level
-            contacts = data.get("contact_list", [])
-            log.info(f"WATI contacts found: {len(contacts)} for {formatted_phone}")
-            for contact in contacts:
-                wn = (contact.get("whatsappNumber") or contact.get("phone") or "").strip()
-                log.info(f"WATI contact whatsappNumber: {wn}")
-                if wn == formatted_phone:
-                    for param in contact.get("customParams", []):
-                        log.info(f"WATI param: {param}")
-                        if param.get("name", "").lower() == "lead_stage":
-                            stage = param.get("value", "").lower().strip()
-                            log.info(f"WATI lead stage for {formatted_phone}: '{stage}'")
-                            return stage
-                    stage = contact.get("leadStage") or contact.get("lead_stage", "")
-                    log.info(f"WATI direct stage for {formatted_phone}: '{stage}'")
-                    return stage.lower().strip() if stage else ""
-            log.info(f"WATI contact not found in results for {formatted_phone}")
+            contact = data.get("contact", data)
+            # Check customParams for lead_stage
+            for param in contact.get("customParams", []):
+                if param.get("name", "").lower() == "lead_stage":
+                    stage = param.get("value", "").lower().strip()
+                    log.info(f"WATI lead stage for {formatted_phone}: '{stage}'")
+                    return stage
+            # Check direct field
+            stage = contact.get("leadStage") or contact.get("lead_stage", "")
+            log.info(f"WATI direct stage for {formatted_phone}: '{stage}'")
+            return stage.lower().strip() if stage else ""
+        elif r.status_code == 404:
+            log.debug(f"WATI contact not found: {formatted_phone}")
             return ""
         else:
-            log.warning(f"WATI getContacts {r.status_code} for {formatted_phone}")
+            log.warning(f"WATI getContact {r.status_code} for {formatted_phone}")
             return ""
     except Exception as e:
-        log.warning(f"WATI getContacts error for {formatted_phone}: {e}")
+        log.warning(f"WATI getContact error for {formatted_phone}: {e}")
         return ""
 
 
