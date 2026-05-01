@@ -280,7 +280,7 @@ def ensure_tracking_sheet(service):
             body={"requests": [{"addSheet": {"properties": {"title": TRACKING_SHEET}}}]}
         ).execute()
         headers = [["TL-REF", "Phone", "Campaign", "First Name", "Lead Date",
-                    "Current Step", "Last Sent", "Status", "Replied At"]]
+                    "Current Step", "Last Sent", "Status", "Contacted At"]]
         service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
             range=f"'{TRACKING_SHEET}'!A1",
@@ -383,7 +383,7 @@ def mark_replied_by_phone(service, phone: str):
             replied_at = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
             update_tracking_row(service, data["row"], data["current_step"],
                                 data["last_sent"], "replied", replied_at)
-            update_sheet1_status(service, phone, "Replied")
+            update_sheet1_status(service, phone, "Contacted")
             log.info(f"Marked {tl_ref} as replied at {replied_at}")
             return
     log.warning(f"No lead found for phone {phone}")
