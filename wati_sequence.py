@@ -33,52 +33,30 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 # ─────────────────────────────────────────────
-# Global 429 backoff — patches ALL Sheets API .execute() calls automatically
-# ─────────────────────────────────────────────
-
-def _install_sheets_backoff():
-    """Monkey-patch googleapiclient HttpRequest.execute with exponential backoff."""
-    import time as _time
-    from googleapiclient import http as _ghttp
-    from googleapiclient.errors import HttpError as _HttpError
-
-    _orig = _ghttp.HttpRequest.execute
-
-    def _execute_with_backoff(self, *args, **kwargs):
-        delay = 2
-        max_retries = 6
-        for attempt in range(max_retries):
-            try:
-                return _orig(self, *args, **kwargs)
-            except _HttpError as e:
-                status = int(e.resp.status)
-                if status in (429, 500, 502, 503) and attempt < max_retries - 1:
-                    log.warning(f"Sheets API {status} — retrying in {delay}s (attempt {attempt+1}/{max_retries})")
-                    _time.sleep(delay)
-                    delay = min(delay * 2, 120)
-                else:
-                    log.error(f"Sheets API {status} failed after {attempt+1} attempts")
-                    raise
-
-    _ghttp.HttpRequest.execute = _execute_with_backoff
-    log.info("✓ Sheets API backoff patch installed")
-
-
-
-# ─────────────────────────────────────────────
 # Startup — decode credentials from env
 # ─────────────────────────────────────────────
 
 load_dotenv()
 
-_sa_b64 = os.getenv('GOOGLE_SERVICE_ACCOUNT_B64', '')
-if _sa_b64:
+_creds_b64 = os.getenv('GOOGLE_CREDENTIALS_B64', '')
+_token_b64  = os.getenv('GOOGLE_TOKEN_B64', '')
+
+if _creds_b64:
     try:
-        padded = _sa_b64 + '=' * (-len(_sa_b64) % 4)
-        with open('service_account.json', 'wb') as f:
+        # Add padding to ensure valid base64
+        padded = _creds_b64 + '=' * (-len(_creds_b64) % 4)
+        with open('credentials.json', 'wb') as f:
             f.write(base64.b64decode(padded))
     except Exception as e:
-        print(f"Warning: Could not decode service account: {e}")
+        print(f"Warning: Could not decode credentials: {e}")
+
+if _token_b64:
+    try:
+        padded = _token_b64 + '=' * (-len(_token_b64) % 4)
+        with open('token.json', 'wb') as f:
+            f.write(base64.b64decode(padded))
+    except Exception as e:
+        print(f"Warning: Could not decode token: {e}")
 
 # ─────────────────────────────────────────────
 # Logging
@@ -116,13 +94,6 @@ CUTOFF_DATE = datetime.datetime(2026, 4, 15)
 ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o"}
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-HEALTHCHECK_URL = "https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187"
-
-# Hours to wait after a client reply before resuming sequence
-RESUME_AFTER_HOURS = 24
-
-# Service account file path (used as fallback if env var not set)
-SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
 
 # ─────────────────────────────────────────────
 # Sequence Definitions
@@ -150,12 +121,9 @@ BST_SEQUENCE = [
 ]
 
 STOPPED_STATUSES = {
-    "callback set", "lead passed", "agreed", "verified",
-    "moc set", "moc approved", "dnc", "dnq", "callback missed", "cbna"
+    "replied", "completed", "opted out", "converted",
+    "do not contact", "callback", "interested"
 }
-
-PAUSE_STATUSES = {"contacted"}
-CONTACTED_RESUMED_STATUS = "contacted resumed"
 
 # ─────────────────────────────────────────────
 # Sending Window Logic
@@ -268,14 +236,26 @@ def send_alert_email(subject: str, body: str):
 # Google Auth
 # ─────────────────────────────────────────────
 
-def get_google_credentials():
-    """Authenticate using Service Account — never expires, no browser needed."""
-    from google.oauth2 import service_account
-    sa_file = os.getenv('SERVICE_ACCOUNT_FILE', 'service_account.json')
-    creds = service_account.Credentials.from_service_account_file(
-        sa_file, scopes=SCOPES
-    )
-    log.info("Service account credentials loaded successfully.")
+def get_google_credentials() -> Credentials:
+    creds = None
+    if Path(TOKEN_FILE).exists():
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        except Exception as e:
+            log.error(f"Failed to load token.json: {e}")
+            creds = None
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            log.info("Refreshing Google credentials...")
+            creds.refresh(Request())
+        else:
+            log.info("Starting OAuth2 flow...")
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(TOKEN_FILE, "w") as f:
+            f.write(creds.to_json())
+        log.info("Credentials saved.")
     return creds
 
 # ─────────────────────────────────────────────
@@ -409,9 +389,9 @@ def mark_replied_by_phone(service, phone: str):
                 return
             replied_at = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
             update_tracking_row(service, data["row"], data["current_step"],
-                                data["last_sent"], "contacted", replied_at)
-            update_sheet1_status(service, phone, "Contacted")
-            log.info(f"Marked {tl_ref} as Contacted at {replied_at}")
+                                data["last_sent"], "replied", replied_at)
+            update_sheet1_status(service, phone, "Replied")
+            log.info(f"Marked {tl_ref} as replied at {replied_at}")
             return
     log.warning(f"No lead found for phone {phone}")
 
@@ -434,94 +414,9 @@ def update_sheet1_status(service, phone: str, status: str):
 # WATI API
 # ─────────────────────────────────────────────
 
-def update_wati_contact_stage(phone: str, stage: str) -> bool:
-    """Update a contact's lead stage in WATI using correct attributes endpoint."""
-    formatted_phone = format_phone(phone)
-    # WATI updateContactAttributes requires number without leading + but with country code
-    url = f"{WATI_API_URL}/api/v1/updateContactAttributes/{formatted_phone}"
-    headers = {
-        "Authorization": f"Bearer {WATI_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "customParams": [
-            {"name": "lead_stage", "value": stage}
-        ]
-    }
-    log.info(f"WATI stage update URL: {url}")
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=30)
-        if r.status_code in (200, 201):
-            log.info(f"WATI lead stage updated to '{stage}' for {formatted_phone}")
-            return True
-        else:
-            log.warning(f"WATI stage update failed {r.status_code} for {formatted_phone}: {r.text[:500]}")
-            return False
-    except Exception as e:
-        log.warning(f"WATI stage update error for {formatted_phone}: {e}")
-        return False
-
-def get_wati_lead_stage(phone: str) -> str:
-    """Fetch the current Lead Stage for a contact from WATI using direct contact lookup."""
-    formatted_phone = format_phone(phone)
-    url = f"{WATI_API_URL}/api/v1/getContact/{formatted_phone}"
-    headers = {"Authorization": f"Bearer {WATI_TOKEN}"}
-    log.info(f"WATI stage lookup: {formatted_phone}")
-    try:
-        r = requests.get(url, headers=headers, timeout=30)
-        log.info(f"WATI getContact response {r.status_code} for {formatted_phone}: {r.text[:300]}")
-        if r.status_code == 200:
-            data = r.json()
-            contact = data.get("contact", data)
-            # Check customParams for lead_stage
-            for param in contact.get("customParams", []):
-                if param.get("name", "").lower() == "lead_stage":
-                    stage = param.get("value", "").lower().strip()
-                    log.info(f"WATI lead stage for {formatted_phone}: '{stage}'")
-                    return stage
-            # Check direct field
-            stage = contact.get("leadStage") or contact.get("lead_stage", "")
-            log.info(f"WATI direct stage for {formatted_phone}: '{stage}'")
-            return stage.lower().strip() if stage else ""
-        elif r.status_code == 404:
-            log.debug(f"WATI contact not found: {formatted_phone}")
-            return ""
-        else:
-            log.warning(f"WATI getContact {r.status_code} for {formatted_phone}")
-            return ""
-    except Exception as e:
-        log.warning(f"WATI getContact error for {formatted_phone}: {e}")
-        return ""
-
-
-def create_wati_contact(phone: str, first_name: str) -> bool:
-    """Add contact to WATI before sending. Returns True if created or already exists."""
-    formatted_phone = format_phone(phone)
-    url = f"{WATI_API_URL}/api/v1/addContact/{formatted_phone}"
-    headers = {
-        "Authorization": f"Bearer {WATI_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {"name": first_name}
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=30)
-        if r.status_code in (200, 201):
-            log.info(f"✓ Contact created in WATI: {formatted_phone} ({first_name})")
-            return True
-        elif r.status_code == 400 and "already exists" in r.text.lower():
-            log.info(f"Contact already exists in WATI: {formatted_phone}")
-            return True
-        else:
-            log.error(f"WATI create contact {r.status_code} for {formatted_phone}: {r.text}")
-            return False
-    except Exception as e:
-        log.error(f"WATI create contact failed for {formatted_phone}: {e}")
-        return False
-
-
 def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     formatted_phone = format_phone(phone)
-    url = f"{WATI_API_URL}/api/v2/sendTemplateMessages"
+    url = f"{WATI_API_URL}/api/v1/sendTemplateMessage/{formatted_phone}"
     headers = {
         "Authorization": f"Bearer {WATI_TOKEN}",
         "Content-Type": "application/json"
@@ -529,12 +424,7 @@ def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     payload = {
         "template_name": template_name,
         "broadcast_name": f"seq_{template_name}_{formatted_phone[-4:]}",
-        "receivers": [
-            {
-                "whatsappNumber": formatted_phone,
-                "customParams": [{"name": "first_name", "value": first_name}]
-            }
-        ]
+        "parameters": [{"name": "first_name", "value": first_name}]
     }
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=30)
@@ -617,51 +507,8 @@ def process_sequences(service):
         if not track:
             continue
 
-        # ── Get WATI Lead Stage as source of truth ──
-        wati_stage = get_wati_lead_stage(lead["phone"])
-        # Fall back to Sheet1 status if WATI API fails
-        sheet1_status = lead["status"].lower().strip()
-        effective_status = wati_stage if wati_stage else sheet1_status
-
-        log.debug(f"{tl_ref}: WATI stage='{wati_stage}' sheet1='{sheet1_status}'")
-
-        # Always keep Sheet1 in sync with WATI stage
-        if wati_stage and wati_stage != sheet1_status:
-            update_sheet1_status(service, lead["phone"], wati_stage.title())
-
-        # Permanently stop if WATI stage indicates case is progressed
-        if any(s in effective_status for s in STOPPED_STATUSES):
-            if track["status"] != "stopped":
-                update_tracking_row(service, track["row"], track["current_step"],
-                                    track["last_sent"], "stopped")
-            log.info(f"{tl_ref}: stopped — WATI stage is '{effective_status}'")
-            continue
-
-        # Handle paused (Contacted) status — resume after 24 hours
-        if effective_status == CONTACTED_RESUMED_STATUS:
-            pass  # treat as normal active lead
-        elif any(s in effective_status for s in PAUSE_STATUSES):
-            replied_at_str = track.get("replied_at", "")
-            if replied_at_str:
-                try:
-                    replied_at = datetime.datetime.strptime(replied_at_str, "%d/%m/%Y %H:%M")
-                    hours_since_reply = (now - replied_at).total_seconds() / 3600
-                    if hours_since_reply < RESUME_AFTER_HOURS:
-                        log.debug(f"{tl_ref}: paused — {RESUME_AFTER_HOURS - hours_since_reply:.1f}h until resume")
-                        continue
-                    else:
-                        log.info(f"{tl_ref}: 24h passed since reply, resuming sequence")
-                        update_sheet1_status(service, lead["phone"], "Contacted Resumed")
-                        update_wati_contact_stage(lead["phone"], "Contacted Resumed")
-                        update_tracking_row(service, track["row"], track["current_step"],
-                                            track["last_sent"], "active")
-                except ValueError:
-                    pass
-            else:
-                continue  # No replied_at timestamp yet, stay paused
-
-        # Skip if tracking says permanently stopped
-        if track["status"].lower() in ("stopped", "completed"):
+        # Skip if tracking says replied/completed
+        if track["status"].lower() in ("replied", "completed", "opted out"):
             continue
 
         sequence     = get_sequence(campaign)
@@ -674,20 +521,7 @@ def process_sequences(service):
             continue
 
         next_msg = sequence[current_step]
-        # W1 is due immediately from lead_date
-        # W2+ are due delay_hours after the PREVIOUS message was sent
-        if current_step == 0:
-            due_at = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
-        else:
-            last_sent_str = track.get("last_sent", "")
-            if last_sent_str:
-                try:
-                    last_sent_dt = datetime.datetime.strptime(last_sent_str, "%d/%m/%Y %H:%M")
-                    due_at = last_sent_dt + datetime.timedelta(hours=next_msg["delay_hours"])
-                except ValueError:
-                    due_at = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
-            else:
-                due_at = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
+        due_at   = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
 
         if now >= due_at:
             # W1 sends immediately always
@@ -695,10 +529,6 @@ def process_sequences(service):
             if current_step > 0 and not is_within_sending_window():
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
                 continue
-
-            # Always create contact in WATI before sending W1
-            if current_step == 0:
-                create_wati_contact(lead["phone"], lead["first_name"])
 
             if send_wati_template(lead["phone"], next_msg["template"], lead["first_name"]):
                 new_step   = current_step + 1
@@ -712,10 +542,6 @@ def process_sequences(service):
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
 
     log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent ───")
-    try:
-        requests.get(HEALTHCHECK_URL, timeout=5)
-    except Exception:
-        pass  # healthcheck ping failure should never crash the service
 
 # ─────────────────────────────────────────────
 # Webhook Server
@@ -766,42 +592,15 @@ def start_webhook_server():
 # Entry Point
 # ─────────────────────────────────────────────
 
-def validate_config():
-    """Check all required constants and env vars exist at startup. Crashes with a clear message if anything is missing."""
-    required_env = {
-        "SPREADSHEET_ID": SPREADSHEET_ID,
-        "WATI_API_URL": WATI_API_URL,
-        "WATI_TOKEN": WATI_TOKEN,
-    }
-    required_constants = {
-        "RESUME_AFTER_HOURS": RESUME_AFTER_HOURS,
-        "PAUSE_STATUSES": PAUSE_STATUSES,
-        "STOPPED_STATUSES": STOPPED_STATUSES,
-        "CONTACTED_RESUMED_STATUS": CONTACTED_RESUMED_STATUS,
-        "ALLOWED_CAMPAIGNS": ALLOWED_CAMPAIGNS,
-        "CUTOFF_DATE": CUTOFF_DATE,
-        "UKDT_SEQUENCE": UKDT_SEQUENCE,
-        "BST_SEQUENCE": BST_SEQUENCE,
-    }
-    errors = []
-    for name, val in required_env.items():
-        if not val:
-            errors.append(f"  ✗ env var {name} is not set")
-    for name, val in required_constants.items():
-        if val is None:
-            errors.append(f"  ✗ constant {name} is not defined")
-    if errors:
-        msg = "STARTUP VALIDATION FAILED:\n" + "\n".join(errors)
-        send_alert_email("WATI Bot — Startup Failed", msg)
-        raise EnvironmentError(msg)
-    log.info("✓ Startup validation passed — all constants and env vars present")
-    _install_sheets_backoff()
-
-
 def main():
     global sheets_service_global
 
-    validate_config()
+    if not SPREADSHEET_ID:
+        raise EnvironmentError("SPREADSHEET_ID not set")
+    if not WATI_API_URL:
+        raise EnvironmentError("WATI_API_URL not set")
+    if not WATI_TOKEN:
+        raise EnvironmentError("WATI_TOKEN not set")
 
     log.info("Starting WATI Sequence Automation...")
     log.info(f"Cutoff date: {CUTOFF_DATE.strftime('%d/%m/%Y')} (leads before this are skipped)")
