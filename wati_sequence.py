@@ -437,6 +437,7 @@ def update_sheet1_status(service, phone: str, status: str):
 def update_wati_contact_stage(phone: str, stage: str) -> bool:
     """Update a contact's lead stage in WATI using correct attributes endpoint."""
     formatted_phone = format_phone(phone)
+    # WATI updateContactAttributes requires number without leading + but with country code
     url = f"{WATI_API_URL}/api/v1/updateContactAttributes/{formatted_phone}"
     headers = {
         "Authorization": f"Bearer {WATI_TOKEN}",
@@ -447,13 +448,14 @@ def update_wati_contact_stage(phone: str, stage: str) -> bool:
             {"name": "lead_stage", "value": stage}
         ]
     }
+    log.info(f"WATI stage update URL: {url}")
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=30)
         if r.status_code in (200, 201):
             log.info(f"WATI lead stage updated to '{stage}' for {formatted_phone}")
             return True
         else:
-            log.warning(f"WATI stage update failed {r.status_code} for {formatted_phone}: {r.text[:200]}")
+            log.warning(f"WATI stage update failed {r.status_code} for {formatted_phone}: {r.text[:500]}")
             return False
     except Exception as e:
         log.warning(f"WATI stage update error for {formatted_phone}: {e}")
