@@ -500,9 +500,23 @@ def process_sequences(service):
         if not track:
             continue
 
-        # Skip if tracking says replied/completed
-        if track["status"].lower() in ("replied", "completed", "opted out"):
+        # Skip if tracking says replied/completed/stopped
+        if track["status"].lower() in ("replied", "completed", "opted out", "stopped"):
             continue
+
+        # Pause if Contacted — auto-resume after 24hrs
+        if status == "contacted":
+            replied_at_str = track.get("replied_at", "")
+            if replied_at_str:
+                try:
+                    import datetime as dt2
+                    replied_at = dt2.datetime.strptime(replied_at_str, "%d/%m/%Y %H:%M")
+                    if (now - replied_at).total_seconds() / 3600 < 24:
+                        continue
+                except ValueError:
+                    pass
+            else:
+                continue
 
         sequence     = get_sequence(campaign)
         current_step = track["current_step"]
