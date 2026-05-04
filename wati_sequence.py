@@ -510,8 +510,9 @@ def process_sequences(service):
     tracking = get_tracking_data(service)
     log.info(f"{len(leads)} leads in sheet | {len(tracking)} in tracking")
 
-    new_leads_added = 0
-    messages_sent   = 0
+    new_leads_added  = 0
+    messages_sent    = 0
+    pending_updates  = []
 
     for lead in leads:
         tl_ref   = lead["tl_ref"].strip()
@@ -591,12 +592,26 @@ def process_sequences(service):
                 new_step   = current_step + 1
                 new_status = "completed" if new_step >= len(sequence) else "active"
                 last_sent  = now.strftime("%d/%m/%Y %H:%M")
-                update_tracking_row(service, track["row"], new_step, last_sent, new_status)
+                pending_updates.append({
+                    "range": f"'WATI Tracking'!F{track['row']}:I{track['row']}",
+                    "values": [[str(new_step), last_sent, new_status, ""]]
+                })
                 messages_sent += 1
                 log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']}")
         else:
             hrs = (due_at - now).total_seconds() / 3600
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
+
+    # ── Batch write all tracking updates in one request ──
+    if pending_updates:
+        try:
+            service.spreadsheets().values().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID,
+                body={"valueInputOption": "RAW", "data": pending_updates}
+            ).execute()
+            log.info(f"Tracking updated: {len(pending_updates)} rows written")
+        except Exception as e:
+            log.error(f"Batch tracking update failed: {e}")
 
     log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent ───")
 
