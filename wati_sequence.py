@@ -36,6 +36,28 @@ from googleapiclient.discovery import build
 # Startup — decode credentials from env
 # ─────────────────────────────────────────────
 
+# ── Google Sheets API backoff patch ──
+import time as _time
+from googleapiclient.http import HttpRequest as _HttpRequest
+_orig_execute = _HttpRequest.execute
+def _backoff_execute(self, *args, **kwargs):
+    delay = 2
+    for attempt in range(7):
+        try:
+            return _orig_execute(self, *args, **kwargs)
+        except Exception as e:
+            if attempt == 6:
+                raise
+            msg = str(e)
+            if "429" in msg or "quota" in msg.lower() or "ssl" in msg.lower():
+                import logging
+                logging.getLogger(__name__).warning(f"Sheets API error (attempt {attempt+1}), retrying in {delay}s: {e}")
+                _time.sleep(delay)
+                delay = min(delay * 2, 120)
+            else:
+                raise
+_HttpRequest.execute = _backoff_execute
+
 load_dotenv()
 
 _creds_b64 = os.getenv('GOOGLE_CREDENTIALS_B64', '')
