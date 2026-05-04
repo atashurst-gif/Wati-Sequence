@@ -407,6 +407,27 @@ def update_sheet1_status(service, phone: str, status: str):
 # WATI API
 # ─────────────────────────────────────────────
 
+def create_wati_contact(phone: str, first_name: str) -> bool:
+    """Create contact in WATI before sending. Returns True if created or already exists."""
+    formatted = phone if phone.startswith("44") else "44" + phone.lstrip("0")
+    url = f"{WATI_API_URL}/api/v1/addContact/{formatted}"
+    headers = {"Authorization": f"Bearer {WATI_TOKEN}", "Content-Type": "application/json"}
+    try:
+        r = requests.post(url, headers=headers, json={"name": first_name}, timeout=10)
+        if r.status_code in (200, 201):
+            log.info(f"WATI contact created: {formatted}")
+            return True
+        elif r.status_code == 400:
+            log.debug(f"WATI contact already exists: {formatted}")
+            return True
+        else:
+            log.warning(f"WATI addContact {r.status_code} for {formatted}: {r.text[:200]}")
+            return False
+    except Exception as e:
+        log.warning(f"WATI addContact error for {formatted}: {e}")
+        return False
+
+
 def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     formatted_phone = format_phone(phone)
     url = f"{WATI_API_URL}/api/v1/sendTemplateMessage/{formatted_phone}"
@@ -537,6 +558,8 @@ def process_sequences(service):
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
                 continue
 
+            if current_step == 0:
+                create_wati_contact(lead["phone"], lead["first_name"])
             if send_wati_template(lead["phone"], next_msg["template"], lead["first_name"]):
                 new_step   = current_step + 1
                 new_status = "completed" if new_step >= len(sequence) else "active"
