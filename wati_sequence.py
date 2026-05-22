@@ -271,10 +271,13 @@ def format_phone(raw: str) -> str:
     digits = re.sub(r'\D', '', str(raw))
     if digits.startswith('07') and len(digits) == 11:
         return '44' + digits[1:]
-    if digits.startswith('447'):
+    if digits.startswith('447') and len(digits) == 12:
         return digits
     if digits.startswith('44') and len(digits) >= 11:
         return digits
+    # 10-digit number starting with 7 — missing leading 0
+    if digits.startswith('7') and len(digits) == 10:
+        return '44' + digits
     return digits
 
 # ─────────────────────────────────────────────
