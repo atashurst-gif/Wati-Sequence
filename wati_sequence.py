@@ -434,7 +434,7 @@ def update_sheet1_status(service, phone: str, status: str):
 
 def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     formatted_phone = format_phone(phone)
-    url = f"{WATI_API_URL}/api/v1/sendTemplateMessage/{formatted_phone}"
+    url = f"{WATI_API_URL}/api/v2/sendTemplateMessages"
     headers = {
         "Authorization": f"Bearer {WATI_TOKEN}",
         "Content-Type": "application/json"
@@ -442,7 +442,12 @@ def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     payload = {
         "template_name": template_name,
         "broadcast_name": f"seq_{template_name}_{formatted_phone[-4:]}",
-        "parameters": [{"name": "first_name", "value": first_name}]
+        "receivers": [
+            {
+                "whatsappNumber": formatted_phone,
+                "customParams": [{"name": "first_name", "value": first_name}]
+            }
+        ]
     }
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=30)
