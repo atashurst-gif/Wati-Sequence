@@ -78,7 +78,11 @@ log = logging.getLogger(__name__)
 
 SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID")
 SHEET_NAME        = os.getenv("SHEET_NAME", "Sheet1")
-TRACKING_SHEET    = "WATI Tracking"
+TRACKING_SHEET     = "WATI Tracking"
+FLT_TRACKING_SHEET = "FLT Tracking"
+
+def get_tracking_tab(tl_ref: str) -> str:
+    return FLT_TRACKING_SHEET if str(tl_ref).upper().startswith("FLT-") else TRACKING_SHEET
 WATI_API_URL      = os.getenv("WATI_API_URL")
 WATI_TOKEN        = os.getenv("WATI_TOKEN")
 POLL_INTERVAL     = int(os.getenv("WATI_POLL_INTERVAL", "300"))
@@ -280,101 +284,111 @@ def format_phone(raw: str) -> str:
 def ensure_tracking_sheet(service):
     meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
     tabs = [s['properties']['title'] for s in meta.get('sheets', [])]
-    if TRACKING_SHEET not in tabs:
-        log.info(f"Creating '{TRACKING_SHEET}' tab...")
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={"requests": [{"addSheet": {"properties": {"title": TRACKING_SHEET}}}]}
-        ).execute()
-        headers = [["TL-REF", "Phone", "Campaign", "First Name", "Lead Date",
-                    "Current Step", "Last Sent", "Status", "Replied At"]]
-        service.spreadsheets().values().append(
-            spreadsheetId=SPREADSHEET_ID,
-            range=f"'{TRACKING_SHEET}'!A1",
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": headers}
-        ).execute()
-        log.info("Tracking sheet created.")
+    headers = [["TL-REF", "Phone", "Campaign", "First Name", "Lead Date",
+                "Current Step", "Last Sent", "Status", "Replied At"]]
+    for tab in [TRACKING_SHEET, FLT_TRACKING_SHEET]:
+        if tab not in tabs:
+            log.info(f"Creating '{tab}' tab...")
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID,
+                body={"requests": [{"addSheet": {"properties": {"title": tab}}}]}
+            ).execute()
+            service.spreadsheets().values().append(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"'{tab}'!A1",
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": headers}
+            ).execute()
+            log.info(f"'{tab}' created.")
 
 
 def get_all_leads(service) -> list:
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"'{SHEET_NAME}'!A:F"
-    ).execute()
-    rows = result.get('values', [])
-    if len(rows) < 2:
-        return []
     leads = []
-    for i, row in enumerate(rows[1:], start=2):
-        if len(row) < 4:
+    for sheet_tab in [SHEET_NAME, "FLT"]:
+        try:
+            result = service.spreadsheets().values().get(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"'{sheet_tab}'!A:F"
+            ).execute()
+        except Exception as e:
+            log.warning(f"Could not read tab '{sheet_tab}': {e}")
             continue
-        leads.append({
-            "row":        i,
-            "date":       row[0] if len(row) > 0 else "",
-            "tl_ref":     row[1] if len(row) > 1 else "",
-            "first_name": row[2] if len(row) > 2 else "",
-            "phone":      row[3] if len(row) > 3 else "",
-            "campaign":   row[4] if len(row) > 4 else "",
-            "status":     row[5] if len(row) > 5 else "No contact",
-        })
+        rows = result.get('values', [])
+        if len(rows) < 2:
+            continue
+        for i, row in enumerate(rows[1:], start=2):
+            if len(row) < 4:
+                continue
+            leads.append({
+                "row":        i,
+                "sheet_tab":  sheet_tab,
+                "date":       row[0] if len(row) > 0 else "",
+                "tl_ref":     row[1] if len(row) > 1 else "",
+                "first_name": row[2] if len(row) > 2 else "",
+                "phone":      row[3] if len(row) > 3 else "",
+                "campaign":   row[4] if len(row) > 4 else "",
+                "status":     row[5] if len(row) > 5 else "No contact",
+            })
     return leads
 
 
 def get_tracking_data(service) -> dict:
-    try:
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=f"'{TRACKING_SHEET}'!A:I"
-        ).execute()
-        rows = result.get('values', [])
-        if len(rows) < 2:
-            return {}
-        tracking = {}
-        for i, row in enumerate(rows[1:], start=2):
-            if not row:
+    tracking = {}
+    for tab in [TRACKING_SHEET, FLT_TRACKING_SHEET]:
+        try:
+            result = service.spreadsheets().values().get(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"'{tab}'!A:I"
+            ).execute()
+            rows = result.get('values', [])
+            if len(rows) < 2:
                 continue
-            tl_ref = row[0].strip() if row else ""
-            if not tl_ref:
-                continue
-            tracking[tl_ref] = {
-                "row":          i,
-                "tl_ref":       tl_ref,
-                "phone":        row[1] if len(row) > 1 else "",
-                "campaign":     row[2] if len(row) > 2 else "",
-                "first_name":   row[3] if len(row) > 3 else "",
-                "lead_date":    row[4] if len(row) > 4 else "",
-                "current_step": int(row[5]) if len(row) > 5 and str(row[5]).isdigit() else 0,
-                "last_sent":    row[6] if len(row) > 6 else "",
-                "status":       row[7] if len(row) > 7 else "active",
-                "replied_at":   row[8] if len(row) > 8 else "",
-            }
-        return tracking
-    except Exception as e:
-        log.error(f"Failed to read tracking: {e}")
-        return {}
+            for i, row in enumerate(rows[1:], start=2):
+                if not row:
+                    continue
+                tl_ref = row[0].strip() if row else ""
+                if not tl_ref:
+                    continue
+                tracking[tl_ref] = {
+                    "row":          i,
+                    "tracking_tab": tab,
+                    "tl_ref":       tl_ref,
+                    "phone":        row[1] if len(row) > 1 else "",
+                    "campaign":     row[2] if len(row) > 2 else "",
+                    "first_name":   row[3] if len(row) > 3 else "",
+                    "lead_date":    row[4] if len(row) > 4 else "",
+                    "current_step": int(row[5]) if len(row) > 5 and str(row[5]).isdigit() else 0,
+                    "last_sent":    row[6] if len(row) > 6 else "",
+                    "status":       row[7] if len(row) > 7 else "active",
+                    "replied_at":   row[8] if len(row) > 8 else "",
+                }
+        except Exception as e:
+            log.error(f"Failed to read tracking tab '{tab}': {e}")
+    return tracking
 
 
 def add_to_tracking(service, lead: dict):
+    tab = get_tracking_tab(lead["tl_ref"])
     row = [lead["tl_ref"], lead["phone"], lead["campaign"], lead["first_name"],
            lead["date"], "0", "", "active", ""]
     service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"'{TRACKING_SHEET}'!A1",
+        range=f"'{tab}'!A1",
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": [row]}
     ).execute()
-    log.info(f"Added {lead['tl_ref']} to tracking.")
+    log.info(f"Added {lead['tl_ref']} to {tab}.")
 
 
 def update_tracking_row(service, row_num: int, step: int,
                         last_sent: str, status: str = "active",
-                        replied_at: str = ""):
+                        replied_at: str = "", tracking_tab: str = ""):
+    tab = tracking_tab if tracking_tab else TRACKING_SHEET
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"'{TRACKING_SHEET}'!F{row_num}:I{row_num}",
+        range=f"'{tab}'!F{row_num}:I{row_num}",
         valueInputOption="RAW",
         body={"values": [[str(step), last_sent, status, replied_at]]}
     ).execute()
@@ -401,13 +415,14 @@ def update_sheet1_status(service, phone: str, status: str):
     formatted = format_phone(phone)
     for lead in leads:
         if format_phone(lead["phone"]) == formatted:
+            tab = lead.get("sheet_tab", SHEET_NAME)
             service.spreadsheets().values().update(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"'{SHEET_NAME}'!F{lead['row']}",
+                range=f"'{tab}'!F{lead['row']}",
                 valueInputOption="RAW",
                 body={"values": [[status]]}
             ).execute()
-            log.info(f"Sheet1 row {lead['row']} status → '{status}'")
+            log.info(f"{tab} row {lead['row']} status → '{status}'")
             return
 
 # ─────────────────────────────────────────────
