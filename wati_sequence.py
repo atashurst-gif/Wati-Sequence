@@ -91,7 +91,7 @@ TOKEN_FILE        = os.getenv("TOKEN_FILE", "token.json")
 CUTOFF_DATE = datetime.datetime(2026, 4, 15)
 
 # Only these campaigns get WhatsApp sequences
-ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o"}
+ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o", "flt", "ukdt ct2"}
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
