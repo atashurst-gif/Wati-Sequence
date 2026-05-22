@@ -36,28 +36,6 @@ from googleapiclient.discovery import build
 # Startup — decode credentials from env
 # ─────────────────────────────────────────────
 
-# ── Google Sheets API backoff patch ──
-import time as _time
-from googleapiclient.http import HttpRequest as _HttpRequest
-_orig_execute = _HttpRequest.execute
-def _backoff_execute(self, *args, **kwargs):
-    delay = 2
-    for attempt in range(7):
-        try:
-            return _orig_execute(self, *args, **kwargs)
-        except Exception as e:
-            if attempt == 6:
-                raise
-            msg = str(e)
-            if "429" in msg or "quota" in msg.lower() or "ssl" in msg.lower():
-                import logging
-                logging.getLogger(__name__).warning(f"Sheets API error (attempt {attempt+1}), retrying in {delay}s: {e}")
-                _time.sleep(delay)
-                delay = min(delay * 2, 120)
-            else:
-                raise
-_HttpRequest.execute = _backoff_execute
-
 load_dotenv()
 
 _creds_b64 = os.getenv('GOOGLE_CREDENTIALS_B64', '')
@@ -113,7 +91,7 @@ TOKEN_FILE        = os.getenv("TOKEN_FILE", "token.json")
 CUTOFF_DATE = datetime.datetime(2026, 4, 15)
 
 # Only these campaigns get WhatsApp sequences
-ALLOWED_CAMPAIGNS = {"ukdt ct", "ukdt ct2", "bst", "ukdt o"}
+ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o"}
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -129,9 +107,6 @@ UKDT_SEQUENCE = [
     {"step": 5, "template": "ukdt_nc5", "delay_hours": 120},
     {"step": 6, "template": "ukdt_nc6", "delay_hours": 168},
     {"step": 7, "template": "ukdt_nc7", "delay_hours": 216},
-    {"step": 8, "template": "ukdt_nc8",  "delay_hours": 384},
-    {"step": 9, "template": "ukdt_nc9",  "delay_hours": 480},
-    {"step": 10, "template": "ukdt_nc10", "delay_hours": 600},
 ]
 
 BST_SEQUENCE = [
@@ -143,8 +118,6 @@ BST_SEQUENCE = [
     {"step": 6, "template": "bst_nc_6", "delay_hours": 168},
     {"step": 7, "template": "bst_nc7",  "delay_hours": 216},
     {"step": 8, "template": "bst_nc8",  "delay_hours": 288},
-    {"step": 9, "template": "bst_nc9",  "delay_hours": 480},
-    {"step": 10, "template": "bst_nc10", "delay_hours": 600},
 ]
 
 STOPPED_STATUSES = {
@@ -263,20 +236,27 @@ def send_alert_email(subject: str, body: str):
 # Google Auth
 # ─────────────────────────────────────────────
 
-def get_google_credentials():
-    """Authenticate using Service Account from env var — never expires."""
-    import json
-    import base64
-    from google.oauth2 import service_account
-    sa_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64", "")
-    if sa_b64:
-        padded = sa_b64 + "=" * (-len(sa_b64) % 4)
-        info = json.loads(base64.b64decode(padded).decode("utf-8"))
-        creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-        log.info("Service account credentials loaded successfully.")
-        return creds
-    raise EnvironmentError("GOOGLE_SERVICE_ACCOUNT_B64 not set")
+def get_google_credentials() -> Credentials:
+    creds = None
+    if Path(TOKEN_FILE).exists():
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        except Exception as e:
+            log.error(f"Failed to load token.json: {e}")
+            creds = None
 
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            log.info("Refreshing Google credentials...")
+            creds.refresh(Request())
+        else:
+            log.info("Starting OAuth2 flow...")
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(TOKEN_FILE, "w") as f:
+            f.write(creds.to_json())
+        log.info("Credentials saved.")
+    return creds
 
 # ─────────────────────────────────────────────
 # Phone Formatting
@@ -307,7 +287,7 @@ def ensure_tracking_sheet(service):
             body={"requests": [{"addSheet": {"properties": {"title": TRACKING_SHEET}}}]}
         ).execute()
         headers = [["TL-REF", "Phone", "Campaign", "First Name", "Lead Date",
-                    "Current Step", "Last Sent", "Status", "Contacted At"]]
+                    "Current Step", "Last Sent", "Status", "Replied At"]]
         service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
             range=f"'{TRACKING_SHEET}'!A1",
@@ -410,7 +390,7 @@ def mark_replied_by_phone(service, phone: str):
             replied_at = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
             update_tracking_row(service, data["row"], data["current_step"],
                                 data["last_sent"], "replied", replied_at)
-            update_sheet1_status(service, phone, "Contacted")
+            update_sheet1_status(service, phone, "Replied")
             log.info(f"Marked {tl_ref} as replied at {replied_at}")
             return
     log.warning(f"No lead found for phone {phone}")
@@ -434,30 +414,9 @@ def update_sheet1_status(service, phone: str, status: str):
 # WATI API
 # ─────────────────────────────────────────────
 
-def create_wati_contact(phone: str, first_name: str) -> bool:
-    """Create contact in WATI before sending. Returns True if created or already exists."""
-    formatted = phone if phone.startswith("44") else "44" + phone.lstrip("0")
-    url = f"{WATI_API_URL}/api/v1/addContact/{formatted}"
-    headers = {"Authorization": f"Bearer {WATI_TOKEN}", "Content-Type": "application/json"}
-    try:
-        r = requests.post(url, headers=headers, json={"name": first_name}, timeout=10)
-        if r.status_code in (200, 201):
-            log.info(f"WATI contact created: {formatted}")
-            return True
-        elif r.status_code == 400:
-            log.debug(f"WATI contact already exists: {formatted}")
-            return True
-        else:
-            log.warning(f"WATI addContact {r.status_code} for {formatted}: {r.text[:200]}")
-            return False
-    except Exception as e:
-        log.warning(f"WATI addContact error for {formatted}: {e}")
-        return False
-
-
 def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     formatted_phone = format_phone(phone)
-    url = f"{WATI_API_URL}/api/v2/sendTemplateMessages"
+    url = f"{WATI_API_URL}/api/v1/sendTemplateMessage/{formatted_phone}"
     headers = {
         "Authorization": f"Bearer {WATI_TOKEN}",
         "Content-Type": "application/json"
@@ -465,12 +424,7 @@ def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
     payload = {
         "template_name": template_name,
         "broadcast_name": f"seq_{template_name}_{formatted_phone[-4:]}",
-        "receivers": [
-            {
-                "whatsappNumber": formatted_phone,
-                "customParams": [{"name": "first_name", "value": first_name}]
-            }
-        ]
+        "parameters": [{"name": "first_name", "value": first_name}]
     }
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=30)
@@ -478,7 +432,7 @@ def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
             log.info(f"✓ Sent {template_name} to {formatted_phone} ({first_name})")
             return True
         else:
-            log.error(f"WATI {r.status_code} for {formatted_phone}: {r.text[:300]}")
+            log.error(f"WATI {r.status_code} for {formatted_phone}: {r.text}")
             return False
     except Exception as e:
         log.error(f"WATI request failed for {formatted_phone}: {e}")
@@ -515,9 +469,8 @@ def process_sequences(service):
     tracking = get_tracking_data(service)
     log.info(f"{len(leads)} leads in sheet | {len(tracking)} in tracking")
 
-    new_leads_added  = 0
-    messages_sent    = 0
-    pending_updates  = []
+    new_leads_added = 0
+    messages_sent   = 0
 
     for lead in leads:
         tl_ref   = lead["tl_ref"].strip()
@@ -554,23 +507,9 @@ def process_sequences(service):
         if not track:
             continue
 
-        # Skip if tracking says replied/completed/stopped
-        if track["status"].lower() in ("replied", "completed", "opted out", "stopped"):
+        # Skip if tracking says replied/completed
+        if track["status"].lower() in ("replied", "completed", "opted out"):
             continue
-
-        # Pause if Contacted — auto-resume after 24hrs
-        if status == "contacted":
-            replied_at_str = track.get("replied_at", "")
-            if replied_at_str:
-                try:
-                    import datetime as dt2
-                    replied_at = dt2.datetime.strptime(replied_at_str, "%d/%m/%Y %H:%M")
-                    if (now - replied_at).total_seconds() / 3600 < 24:
-                        continue
-                except ValueError:
-                    pass
-            else:
-                continue
 
         sequence     = get_sequence(campaign)
         current_step = track["current_step"]
@@ -591,32 +530,16 @@ def process_sequences(service):
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
                 continue
 
-            if current_step == 0:
-                create_wati_contact(lead["phone"], lead["first_name"])
             if send_wati_template(lead["phone"], next_msg["template"], lead["first_name"]):
                 new_step   = current_step + 1
                 new_status = "completed" if new_step >= len(sequence) else "active"
                 last_sent  = now.strftime("%d/%m/%Y %H:%M")
-                pending_updates.append({
-                    "range": f"'WATI Tracking'!F{track['row']}:I{track['row']}",
-                    "values": [[str(new_step), last_sent, new_status, ""]]
-                })
+                update_tracking_row(service, track["row"], new_step, last_sent, new_status)
                 messages_sent += 1
                 log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']}")
         else:
             hrs = (due_at - now).total_seconds() / 3600
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
-
-    # ── Batch write all tracking updates in one request ──
-    if pending_updates:
-        try:
-            service.spreadsheets().values().batchUpdate(
-                spreadsheetId=SPREADSHEET_ID,
-                body={"valueInputOption": "RAW", "data": pending_updates}
-            ).execute()
-            log.info(f"Tracking updated: {len(pending_updates)} rows written")
-        except Exception as e:
-            log.error(f"Batch tracking update failed: {e}")
 
     log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent ───")
 
