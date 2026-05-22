@@ -540,7 +540,8 @@ def process_sequences(service):
         if current_step >= len(sequence):
             if track["status"] != "completed":
                 update_tracking_row(service, track["row"], current_step,
-                                    track["last_sent"], "completed")
+                                    track["last_sent"], "completed",
+                                    tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
             continue
 
         next_msg = sequence[current_step]
@@ -557,7 +558,8 @@ def process_sequences(service):
                 new_step   = current_step + 1
                 new_status = "completed" if new_step >= len(sequence) else "active"
                 last_sent  = now.strftime("%d/%m/%Y %H:%M")
-                update_tracking_row(service, track["row"], new_step, last_sent, new_status)
+                update_tracking_row(service, track["row"], new_step, last_sent, new_status,
+                                tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
                 messages_sent += 1
                 log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']}")
         else:
