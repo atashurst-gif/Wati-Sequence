@@ -99,6 +99,17 @@ ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o", "flt", "ukdt ct2"}
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "30"))  # throttle backlog drain
+HC_PING_URL = os.getenv("HC_PING_URL", "https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187")
+_read_failed = False  # set True by read-error handlers; checked at cycle end
+
+def ping(suffix=""):
+    """Ping healthcheck. suffix='/fail' marks the check failed (turns red + emails)."""
+    if not HC_PING_URL:
+        return
+    try:
+        requests.get(HC_PING_URL + suffix, timeout=10)
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────
 # Sequence Definitions
@@ -308,6 +319,7 @@ def get_all_leads(service) -> list:
             ).execute()
         except Exception as e:
             log.warning(f"Could not read tab '{sheet_tab}': {e}")
+            global _read_failed; _read_failed = True
             continue
         rows = result.get('values', [])
         if len(rows) < 2:
@@ -360,6 +372,7 @@ def get_tracking_data(service) -> dict:
                 }
         except Exception as e:
             log.error(f"Failed to read tracking tab '{tab}': {e}")
+            global _read_failed; _read_failed = True
     return tracking
 
 
@@ -479,6 +492,8 @@ def parse_lead_date(date_str: str):
 
 def process_sequences(service):
     log.info("─── Processing sequences ───")
+    global _read_failed
+    _read_failed = False
     now      = datetime.datetime.now()
     leads    = get_all_leads(service)
     tracking = get_tracking_data(service)
@@ -562,6 +577,10 @@ def process_sequences(service):
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
 
     log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent ───")
+    if _read_failed:
+        ping("/fail")  # a sheet read failed this cycle — turn check RED so we get alerted
+    else:
+        ping()         # healthy cycle — sheets read OK
 
 # ─────────────────────────────────────────────
 # Webhook Server
