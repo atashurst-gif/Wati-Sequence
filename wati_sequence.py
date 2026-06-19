@@ -558,9 +558,9 @@ def process_sequences(service):
         due_at   = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
 
         if now >= due_at:
-            # W1 sends immediately always
-            # W2+ only send within business hours
-            if current_step > 0 and not is_within_sending_window():
+            # All steps (incl W1) respect business hours — no out-of-hours sends.
+            # New leads still get instant W0 from the poller (separate service).
+            if not is_within_sending_window():
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
                 continue
 
