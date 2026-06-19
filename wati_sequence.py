@@ -98,6 +98,7 @@ CUTOFF_DATE = datetime.datetime(2026, 4, 15)
 ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o", "flt", "ukdt ct2"}
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "30"))  # throttle backlog drain
 
 # ─────────────────────────────────────────────
 # Sequence Definitions
@@ -240,27 +241,18 @@ def send_alert_email(subject: str, body: str):
 # Google Auth
 # ─────────────────────────────────────────────
 
-def get_google_credentials() -> Credentials:
-    creds = None
-    if Path(TOKEN_FILE).exists():
-        try:
-            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-        except Exception as e:
-            log.error(f"Failed to load token.json: {e}")
-            creds = None
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            log.info("Refreshing Google credentials...")
-            creds.refresh(Request())
-        else:
-            log.info("Starting OAuth2 flow...")
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(TOKEN_FILE, "w") as f:
-            f.write(creds.to_json())
-        log.info("Credentials saved.")
-    return creds
+def get_google_credentials():
+    """Service-account auth (read/write). Replaces expiring OAuth token.
+    Uses GOOGLE_SERVICE_ACCOUNT_B64 — same credential as the W0 poller.
+    Does not expire, so no more invalid_grant outages."""
+    import base64, json
+    from google.oauth2.service_account import Credentials as SACredentials
+    sa_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64", "")
+    if not sa_b64:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_B64 not set")
+    padded = sa_b64 + "=" * (-len(sa_b64) % 4)
+    sa_dict = json.loads(base64.b64decode(padded).decode())
+    return SACredentials.from_service_account_info(sa_dict, scopes=SCOPES)
 
 # ─────────────────────────────────────────────
 # Phone Formatting
@@ -496,6 +488,9 @@ def process_sequences(service):
     messages_sent   = 0
 
     for lead in leads:
+        if messages_sent >= MAX_SENDS_PER_CYCLE:
+            log.info(f"Cycle cap reached ({MAX_SENDS_PER_CYCLE}) — remaining leads next cycle")
+            break
         tl_ref   = lead["tl_ref"].strip()
         campaign = lead["campaign"].strip()
         status   = lead["status"].lower().strip()
