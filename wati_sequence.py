@@ -557,6 +557,20 @@ def process_sequences(service):
         next_msg = sequence[current_step]
         due_at   = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
 
+        # Spacing gate: don't fire step N until the real gap since the PREVIOUS
+        # step's actual send has elapsed. Stops backlog leads bursting through
+        # multiple steps in minutes. Normally-paced leads are unaffected.
+        prev_delay = sequence[current_step - 1]["delay_hours"] if current_step > 0 else 0
+        required_gap_h = next_msg["delay_hours"] - prev_delay
+        last_sent_str = track.get("last_sent", "")
+        if current_step > 0 and last_sent_str:
+            try:
+                last_dt = datetime.datetime.strptime(last_sent_str, "%d/%m/%Y %H:%M")
+                if (now - last_dt).total_seconds() / 3600 < required_gap_h:
+                    continue  # not enough real time since last send — wait
+            except ValueError:
+                pass  # unparseable date — don't block
+
         if now >= due_at:
             # All steps (incl W1) respect business hours — no out-of-hours sends.
             # New leads still get instant W0 from the poller (separate service).
