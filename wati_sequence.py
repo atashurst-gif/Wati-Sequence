@@ -509,7 +509,9 @@ def process_sequences(service):
         _norm_phone(t["phone"])
         for t in tracking.values()
         if any(s in (t.get("status") or "").lower() for s in STOPPED_STATUSES)
+        and len(_norm_phone(t["phone"])) == 10
     }
+    stopped_phones.discard("")
 
     new_leads_added = 0
     messages_sent   = 0
