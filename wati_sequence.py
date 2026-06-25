@@ -499,6 +499,18 @@ def process_sequences(service):
     tracking = get_tracking_data(service)
     log.info(f"{len(leads)} leads in sheet | {len(tracking)} in tracking")
 
+    # Phone-level dedup: if a person is stopped under ANY reference (TL/FLT,
+    # any tab), skip them everywhere. Prevents duplicate records from one
+    # person being messaged after they've replied/passed on another record.
+    def _norm_phone(ph):
+        d = re.sub(r"\D", "", str(ph))
+        return d[-10:] if len(d) >= 10 else d
+    stopped_phones = {
+        _norm_phone(t["phone"])
+        for t in tracking.values()
+        if any(s in (t.get("status") or "").lower() for s in STOPPED_STATUSES)
+    }
+
     new_leads_added = 0
     messages_sent   = 0
 
@@ -519,6 +531,11 @@ def process_sequences(service):
 
         # Skip if status indicates stop
         if any(s in status for s in STOPPED_STATUSES):
+            continue
+
+        # Skip if this PERSON (by phone) is stopped under any other reference
+        if _norm_phone(lead["phone"]) in stopped_phones:
+            log.info(f"{tl_ref}: phone stopped under another reference — skipping")
             continue
 
         # Parse lead date
