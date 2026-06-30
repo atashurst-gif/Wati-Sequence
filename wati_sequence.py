@@ -99,6 +99,22 @@ ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o", "flt", "ukdt ct2"}
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "30"))  # throttle backlog drain
+MAX_SENDS_PER_DAY = int(os.getenv("MAX_SENDS_PER_DAY", "80"))  # hard daily ceiling — flattens Monday backlog spike
+_daily_sends = {}  # {date: count} — persists across cycles, auto-resets each day
+
+def _today_sent():
+    """How many sends so far today (UK date). Auto-prunes old days."""
+    import datetime as _dt
+    today = _dt.date.today()
+    for d in list(_daily_sends):
+        if d != today:
+            del _daily_sends[d]
+    return _daily_sends.get(today, 0)
+
+def _bump_today():
+    import datetime as _dt
+    today = _dt.date.today()
+    _daily_sends[today] = _daily_sends.get(today, 0) + 1
 HC_PING_URL = os.getenv("HC_PING_URL", "https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187")
 _read_failed = False  # set True by read-error handlers; checked at cycle end
 
@@ -520,6 +536,9 @@ def process_sequences(service):
         if messages_sent >= MAX_SENDS_PER_CYCLE:
             log.info(f"Cycle cap reached ({MAX_SENDS_PER_CYCLE}) — remaining leads next cycle")
             break
+        if _today_sent() >= MAX_SENDS_PER_DAY:
+            log.info(f"Daily cap reached ({MAX_SENDS_PER_DAY}) — backlog spreads to following days, no spike")
+            break
         tl_ref   = lead["tl_ref"].strip()
         campaign = lead["campaign"].strip()
         status   = lead["status"].lower().strip()
@@ -604,7 +623,8 @@ def process_sequences(service):
                 update_tracking_row(service, track["row"], new_step, last_sent, new_status,
                                 tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
                 messages_sent += 1
-                log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']}")
+                _bump_today()
+                log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']} (day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
         else:
             hrs = (due_at - now).total_seconds() / 3600
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
