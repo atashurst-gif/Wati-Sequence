@@ -531,6 +531,7 @@ def process_sequences(service):
 
     new_leads_added = 0
     messages_sent   = 0
+    stopped_skips   = 0
 
     for lead in leads:
         if messages_sent >= MAX_SENDS_PER_CYCLE:
@@ -556,7 +557,7 @@ def process_sequences(service):
 
         # Skip if this PERSON (by phone) is stopped under any other reference
         if _norm_phone(lead["phone"]) in stopped_phones:
-            log.info(f"{tl_ref}: phone stopped under another reference — skipping")
+            stopped_skips += 1
             continue
 
         # Parse lead date
@@ -629,7 +630,7 @@ def process_sequences(service):
             hrs = (due_at - now).total_seconds() / 3600
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
 
-    log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent ───")
+    log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent, {stopped_skips} phone-stopped skips ───")
     if _read_failed:
         ping("/fail")  # a sheet read failed this cycle — turn check RED so we get alerted
     else:
