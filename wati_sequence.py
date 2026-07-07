@@ -100,9 +100,11 @@ CUTOFF_DATE = datetime.datetime(2026, 4, 15)
 ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o", "flt", "ukdt ct2"}
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "30"))  # throttle backlog drain
-MAX_SENDS_PER_DAY = int(os.getenv("MAX_SENDS_PER_DAY", "80"))  # hard daily ceiling — flattens Monday backlog spike
+MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "10"))  # per-cycle drip feed, not a burst
+MAX_SENDS_PER_HOUR = int(os.getenv("MAX_SENDS_PER_HOUR", "9"))  # spread catch-up through the day
+MAX_SENDS_PER_DAY = int(os.getenv("MAX_SENDS_PER_DAY", "80"))  # hard daily ceiling on actual sends
 _daily_sends = {}  # {date: count} — persists across cycles, auto-resets each day
+_hourly_sends = {}  # {(date, hour): count} — smooths backlog catch-up
 
 UK_TZ = ZoneInfo("Europe/London")
 
@@ -114,26 +116,45 @@ def _today_sent():
             del _daily_sends[d]
     return _daily_sends.get(today, 0)
 
+def _hour_sent():
+    """How many sends so far this UK clock-hour. Auto-prunes old hours."""
+    now = datetime.datetime.now(UK_TZ)
+    key = (now.date(), now.hour)
+    for k in list(_hourly_sends):
+        if k != key:
+            del _hourly_sends[k]
+    return _hourly_sends.get(key, 0)
+
+
 def _bump_today():
-    today = datetime.datetime.now(UK_TZ).date()
+    now = datetime.datetime.now(UK_TZ)
+    today = now.date()
     _daily_sends[today] = _daily_sends.get(today, 0) + 1
+    hour_key = (today, now.hour)
+    _hourly_sends[hour_key] = _hourly_sends.get(hour_key, 0) + 1
 
 
 def _sync_today_from_tracking(tracking: dict):
     """Seed the daily cap from persisted tracking so redeploys cannot reset it."""
     today = datetime.datetime.now(UK_TZ).date()
+    now = datetime.datetime.now(UK_TZ)
+    current_hour = now.hour
     sent_today = 0
+    sent_this_hour = 0
     for item in tracking.values():
         last_sent = item.get("last_sent") or ""
         if not last_sent:
             continue
         try:
-            sent_date = datetime.datetime.strptime(last_sent, "%d/%m/%Y %H:%M").date()
+            sent_dt = datetime.datetime.strptime(last_sent, "%d/%m/%Y %H:%M").replace(tzinfo=UK_TZ)
         except ValueError:
             continue
-        if sent_date == today:
+        if sent_dt.date() == today:
             sent_today += 1
+            if sent_dt.hour == current_hour:
+                sent_this_hour += 1
     _daily_sends[today] = max(_daily_sends.get(today, 0), sent_today)
+    _hourly_sends[(today, current_hour)] = max(_hourly_sends.get((today, current_hour), 0), sent_this_hour)
 
 HC_PING_URL = os.getenv("HC_PING_URL", "https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187")
 HEALTHCHECK_HEARTBEAT_SECONDS = int(os.getenv("HEALTHCHECK_HEARTBEAT_SECONDS", "240"))
@@ -648,6 +669,7 @@ def process_sequences(service):
     messages_sent   = 0
     stopped_skips   = 0
     daily_cap_logged = False
+    hourly_cap_logged = False
     cycle_cap_logged = False
 
     for lead in sorted(leads, key=_lead_priority):
@@ -736,6 +758,11 @@ def process_sequences(service):
                     log.info(f"Cycle cap reached ({MAX_SENDS_PER_CYCLE}) - sends paused, enrolment continues")
                     cycle_cap_logged = True
                 continue
+            if _hour_sent() >= MAX_SENDS_PER_HOUR:
+                if not hourly_cap_logged:
+                    log.info(f"Hourly cap reached ({MAX_SENDS_PER_HOUR}) - catch-up paced, enrolment continues")
+                    hourly_cap_logged = True
+                continue
             if _today_sent() >= MAX_SENDS_PER_DAY:
                 if not daily_cap_logged:
                     log.info(f"Daily cap reached ({MAX_SENDS_PER_DAY}) - sends paused, enrolment continues")
@@ -752,7 +779,7 @@ def process_sequences(service):
                     update_lead_status(service, lead, BOOKING_SEQUENCE_ACTIVE_STATUS)
                 messages_sent += 1
                 _bump_today()
-                log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']} (day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
+                log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']} (hour total: {_hour_sent()}/{MAX_SENDS_PER_HOUR}, day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
         else:
             hrs = (due_at - now).total_seconds() / 3600
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
