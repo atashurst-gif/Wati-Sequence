@@ -82,6 +82,7 @@ SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID")
 SHEET_NAME        = os.getenv("SHEET_NAME", "Sheet1")
 TRACKING_SHEET     = "WATI Tracking"
 FLT_TRACKING_SHEET = "FLT Tracking"
+W0_TRACKING_SHEET  = os.getenv("W0_TRACKING_SHEET", "W0 Tracking")
 
 def get_tracking_tab(tl_ref: str) -> str:
     return FLT_TRACKING_SHEET if str(tl_ref).upper().startswith("FLT-") else TRACKING_SHEET
@@ -417,11 +418,25 @@ def ensure_tracking_sheet(service):
                 body={"values": headers}
             ).execute()
             log.info(f"'{tab}' created.")
+    if W0_TRACKING_SHEET not in tabs:
+        log.info(f"Creating '{W0_TRACKING_SHEET}' tab...")
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": [{"addSheet": {"properties": {"title": W0_TRACKING_SHEET}}}]}
+        ).execute()
+        service.spreadsheets().values().append(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"'{W0_TRACKING_SHEET}'!A1",
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [["Sent At", "TL-REF", "First Name", "Phone", "Campaign", "Status"]]}
+        ).execute()
+        log.info(f"'{W0_TRACKING_SHEET}' created.")
 
 
 def get_all_leads(service) -> list:
     leads = []
-    for sheet_tab in [SHEET_NAME, "FLT"]:
+    for sheet_tab in [SHEET_NAME, "FLT", W0_TRACKING_SHEET]:
         try:
             result = service.spreadsheets().values().get(
                 spreadsheetId=SPREADSHEET_ID,
@@ -446,11 +461,13 @@ def get_all_leads(service) -> list:
                 "phone":      row[3] if len(row) > 3 else "",
                 "campaign":   row[4] if len(row) > 4 else "",
                 "status":     row[5] if len(row) > 5 else "No contact",
+                "source":     "w0" if sheet_tab == W0_TRACKING_SHEET else "crm",
             })
     return leads
 
 
 def get_tracking_data(service) -> dict:
+    global _read_failed
     tracking = {}
     for tab in [TRACKING_SHEET, FLT_TRACKING_SHEET]:
         try:
@@ -482,7 +499,7 @@ def get_tracking_data(service) -> dict:
                 }
         except Exception as e:
             log.error(f"Failed to read tracking tab '{tab}': {e}")
-            global _read_failed; _read_failed = True
+            _read_failed = True
     return tracking
 
 
@@ -498,6 +515,34 @@ def add_to_tracking(service, lead: dict):
         body={"values": [row]}
     ).execute()
     log.info(f"Added {lead['tl_ref']} to {tab}.")
+
+
+def update_w0_tracking_status(service, phone: str, status: str):
+    formatted = format_phone(phone)
+    try:
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"'{W0_TRACKING_SHEET}'!A:F"
+        ).execute()
+    except Exception as e:
+        log.warning(f"Could not read '{W0_TRACKING_SHEET}' for status update: {e}")
+        return
+
+    rows = result.get("values", [])
+    if len(rows) < 2:
+        return
+
+    for idx, row in enumerate(rows[1:], start=2):
+        phone_cell = format_phone(row[3] if len(row) > 3 else "")
+        if phone_cell == formatted:
+            service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"'{W0_TRACKING_SHEET}'!F{idx}",
+                valueInputOption="RAW",
+                body={"values": [[status]]}
+            ).execute()
+            log.info(f"{W0_TRACKING_SHEET} row {idx} status → '{status}'")
+            return
 
 
 def update_tracking_row(service, row_num: int, step: int,
@@ -572,6 +617,7 @@ def mark_replied_by_phone(service, phone: str):
             update_tracking_row(service, data["row"], data["current_step"],
                                 data["last_sent"], "replied", replied_at,
                                 tracking_tab=data.get("tracking_tab", TRACKING_SHEET))
+            update_w0_tracking_status(service, phone, "replied")
             update_sheet1_status(service, phone, "Replied")
             log.info(f"Marked {tl_ref} as replied at {replied_at}")
             return
@@ -664,6 +710,8 @@ def process_sequences(service):
     }
     stopped_phones.discard("")
 
+    today_uk = datetime.datetime.now(UK_TZ).date()
+
     def _lead_priority(lead):
         tl_ref = lead["tl_ref"].strip()
         campaign = lead["campaign"].strip()
@@ -674,32 +722,39 @@ def process_sequences(service):
                 is_stopped_status(status) or _norm_phone(lead["phone"]) in stopped_phones):
             return (9, datetime.datetime.max, datetime.datetime.max, tl_ref)
 
+        source_is_w0 = lead.get("sheet_tab") == W0_TRACKING_SHEET
         track = tracking.get(tl_ref)
         current_step = track["current_step"] if track else 0
         sequence = get_sequence(campaign)
         if current_step >= len(sequence):
             return (8, datetime.datetime.max, lead_date, tl_ref)
 
-        delay_hours = sequence[current_step]["delay_hours"]
-        if is_booking_pending(status) and current_step == 0:
+        if source_is_w0 and current_step == 0:
+            delay_hours = BOOKING_PENDING_DELAY_HOURS if is_booking_pending(status) else 24
+        else:
+            delay_hours = sequence[current_step]["delay_hours"]
+        if is_booking_pending(status) and current_step == 0 and not source_is_w0:
             delay_hours = BOOKING_PENDING_DELAY_HOURS
         due_at = lead_date + datetime.timedelta(hours=delay_hours)
 
-        is_today_lead = lead_date.date() == datetime.datetime.now(UK_TZ).date()
+        is_today_lead = lead_date.date() == today_uk
         if is_today_lead:
             bucket = 0                  # today's live leads before catch-up work
             freshness = lead_date.timestamp()
+        elif source_is_w0:
+            bucket = 1                  # W0 tracking handoff before CRM backlog
+            freshness = -lead_date.timestamp()
         elif track is None:
-            bucket = 1                  # enrol missing eligible leads first
+            bucket = 2                  # enrol missing eligible leads first
             freshness = -lead_date.timestamp()
         elif is_booking_pending(status) and current_step == 0:
-            bucket = 2                  # W0W fallback leads before older backlog
+            bucket = 3                  # W0W fallback leads before older backlog
             freshness = -lead_date.timestamp()
         elif current_step == 0:
-            bucket = 3                  # ordinary W1 before later-step backlog
+            bucket = 4                  # ordinary W1 before later-step backlog
             freshness = -lead_date.timestamp()
         else:
-            bucket = 4
+            bucket = 5
             freshness = -lead_date.timestamp()
         return (bucket, due_at, freshness, tl_ref)
 
@@ -742,6 +797,8 @@ def process_sequences(service):
         if lead_date < CUTOFF_DATE:
             continue
 
+        source_is_w0 = lead.get("sheet_tab") == W0_TRACKING_SHEET
+
         # Add to tracking if not already there
         if tl_ref not in tracking:
             add_to_tracking(service, lead)
@@ -767,8 +824,11 @@ def process_sequences(service):
             continue
 
         next_msg = sequence[current_step]
-        delay_hours = next_msg["delay_hours"]
-        if booking_pending and current_step == 0:
+        if source_is_w0 and current_step == 0:
+            delay_hours = BOOKING_PENDING_DELAY_HOURS if booking_pending else 24
+        else:
+            delay_hours = next_msg["delay_hours"]
+        if booking_pending and current_step == 0 and not source_is_w0:
             delay_hours = BOOKING_PENDING_DELAY_HOURS
         due_at = lead_date + datetime.timedelta(hours=delay_hours)
 
@@ -818,9 +878,12 @@ def process_sequences(service):
                 new_step   = current_step + 1
                 new_status = "completed" if new_step >= len(sequence) else "active"
                 last_sent  = now.strftime("%d/%m/%Y %H:%M")
-                update_tracking_row(service, track["row"], new_step, last_sent, new_status,
-                                tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
-                if booking_pending and current_step == 0:
+                if source_is_w0:
+                    update_w0_tracking_status(service, lead["phone"], "replied" if new_step >= len(sequence) else "w0 sent")
+                else:
+                    update_tracking_row(service, track["row"], new_step, last_sent, new_status,
+                                    tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
+                if booking_pending and current_step == 0 and not source_is_w0:
                     update_lead_status(service, lead, BOOKING_SEQUENCE_ACTIVE_STATUS)
                 messages_sent += 1
                 _bump_today(is_backlog_send)
