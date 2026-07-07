@@ -611,15 +611,44 @@ def process_sequences(service):
     }
     stopped_phones.discard("")
 
+    def _lead_priority(lead):
+        tl_ref = lead["tl_ref"].strip()
+        campaign = lead["campaign"].strip()
+        status = lead["status"].lower().strip()
+        lead_date = parse_lead_date(lead["date"])
+        if (not lead["phone"] or not tl_ref or not lead_date or
+                lead_date < CUTOFF_DATE or not is_allowed_campaign(campaign) or
+                is_stopped_status(status) or _norm_phone(lead["phone"]) in stopped_phones):
+            return (9, datetime.datetime.max, datetime.datetime.max, tl_ref)
+
+        track = tracking.get(tl_ref)
+        current_step = track["current_step"] if track else 0
+        sequence = get_sequence(campaign)
+        if current_step >= len(sequence):
+            return (8, datetime.datetime.max, lead_date, tl_ref)
+
+        delay_hours = sequence[current_step]["delay_hours"]
+        if is_booking_pending(status) and current_step == 0:
+            delay_hours = BOOKING_PENDING_DELAY_HOURS
+        due_at = lead_date + datetime.timedelta(hours=delay_hours)
+
+        if track is None:
+            bucket = 0                  # enrol missing eligible leads first
+        elif is_booking_pending(status) and current_step == 0:
+            bucket = 1                  # W0W fallback leads get first W1 priority
+        elif current_step == 0:
+            bucket = 2                  # ordinary W1 before older later-step backlog
+        else:
+            bucket = 3
+        return (bucket, due_at, lead_date, tl_ref)
+
     new_leads_added = 0
     messages_sent   = 0
     stopped_skips   = 0
     daily_cap_logged = False
+    cycle_cap_logged = False
 
-    for lead in leads:
-        if messages_sent >= MAX_SENDS_PER_CYCLE:
-            log.info(f"Cycle cap reached ({MAX_SENDS_PER_CYCLE}) — remaining leads next cycle")
-            break
+    for lead in sorted(leads, key=_lead_priority):
         tl_ref   = lead["tl_ref"].strip()
         campaign = lead["campaign"].strip()
         status   = lead["status"].lower().strip()
@@ -699,6 +728,11 @@ def process_sequences(service):
             # New leads still get instant W0 from the poller (separate service).
             if not is_within_sending_window():
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
+                continue
+            if messages_sent >= MAX_SENDS_PER_CYCLE:
+                if not cycle_cap_logged:
+                    log.info(f"Cycle cap reached ({MAX_SENDS_PER_CYCLE}) - sends paused, enrolment continues")
+                    cycle_cap_logged = True
                 continue
             if _today_sent() >= MAX_SENDS_PER_DAY:
                 if not daily_cap_logged:
