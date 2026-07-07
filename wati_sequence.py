@@ -19,6 +19,7 @@ import base64
 import random
 import logging
 import smtplib
+import sys
 import datetime
 import threading
 from email.mime.text import MIMEText
@@ -66,7 +67,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.StreamHandler(),
+        logging.StreamHandler(sys.stdout),
         logging.FileHandler("wati_sequence.log", encoding="utf-8"),
     ],
 )
@@ -154,8 +155,13 @@ BST_SEQUENCE = [
 
 STOPPED_STATUSES = {
     "replied", "completed", "opted out", "converted",
-    "do not contact", "callback", "interested"
+    "do not contact", "dnc", "dnq", "callback", "interested",
+    "agreed", "lead passed", "verified", "moc set", "moc approved",
+    "cbna"
 }
+BOOKING_PENDING_STATUS = "booking pending"
+BOOKING_SEQUENCE_ACTIVE_STATUS = "sequence active"
+BOOKING_PENDING_DELAY_HOURS = int(os.getenv("BOOKING_PENDING_DELAY_HOURS", "4"))
 
 # ─────────────────────────────────────────────
 # Sending Window Logic
@@ -418,22 +424,6 @@ def update_tracking_row(service, row_num: int, step: int,
     ).execute()
 
 
-def mark_replied_by_phone(service, phone: str):
-    tracking = get_tracking_data(service)
-    formatted = format_phone(phone)
-    for tl_ref, data in tracking.items():
-        if format_phone(data["phone"]) == formatted:
-            if data["status"].lower() == "replied":
-                return
-            replied_at = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
-            update_tracking_row(service, data["row"], data["current_step"],
-                                data["last_sent"], "replied", replied_at)
-            update_sheet1_status(service, phone, "Replied")
-            log.info(f"Marked {tl_ref} as replied at {replied_at}")
-            return
-    log.warning(f"No lead found for phone {phone}")
-
-
 def update_sheet1_status(service, phone: str, status: str):
     leads = get_all_leads(service)
     formatted = format_phone(phone)
@@ -448,6 +438,56 @@ def update_sheet1_status(service, phone: str, status: str):
             ).execute()
             log.info(f"{tab} row {lead['row']} status → '{status}'")
             return
+
+
+def update_lead_status(service, lead: dict, status: str):
+    tab = lead.get("sheet_tab", SHEET_NAME)
+    service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{tab}'!F{lead['row']}",
+        valueInputOption="RAW",
+        body={"values": [[status]]}
+    ).execute()
+    log.info(f"{tab} row {lead['row']} status → '{status}'")
+
+
+def leads_for_phone(service, phone: str) -> list:
+    formatted = format_phone(phone)
+    return [
+        lead for lead in get_all_leads(service)
+        if format_phone(lead["phone"]) == formatted
+    ]
+
+
+def is_booking_pending(status: str) -> bool:
+    return BOOKING_PENDING_STATUS in (status or "").lower()
+
+
+def is_stopped_status(status: str) -> bool:
+    status = (status or "").lower()
+    return any(s in status for s in STOPPED_STATUSES)
+
+
+def mark_replied_by_phone(service, phone: str):
+    matching_leads = leads_for_phone(service, phone)
+    if any(is_booking_pending(lead.get("status", "")) for lead in matching_leads):
+        log.info(f"Phone {format_phone(phone)} is still booking pending — keeping 4h fallback active")
+        return
+
+    tracking = get_tracking_data(service)
+    formatted = format_phone(phone)
+    for tl_ref, data in tracking.items():
+        if format_phone(data["phone"]) == formatted:
+            if data["status"].lower() == "replied":
+                return
+            replied_at = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+            update_tracking_row(service, data["row"], data["current_step"],
+                                data["last_sent"], "replied", replied_at,
+                                tracking_tab=data.get("tracking_tab", TRACKING_SHEET))
+            update_sheet1_status(service, phone, "Replied")
+            log.info(f"Marked {tl_ref} as replied at {replied_at}")
+            return
+    log.warning(f"No lead found for phone {phone}")
 
 # ─────────────────────────────────────────────
 # WATI API
@@ -498,7 +538,12 @@ def is_allowed_campaign(campaign: str) -> bool:
 
 
 def parse_lead_date(date_str: str):
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"):
+    for fmt in (
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+        "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
+        "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y",
+    ):
         try:
             return datetime.datetime.strptime(date_str.strip(), fmt)
         except ValueError:
@@ -510,6 +555,7 @@ def process_sequences(service):
     log.info("─── Processing sequences ───")
     global _read_failed
     _read_failed = False
+    ping()
     now      = datetime.datetime.now()
     leads    = get_all_leads(service)
     tracking = get_tracking_data(service)
@@ -524,7 +570,7 @@ def process_sequences(service):
     stopped_phones = {
         _norm_phone(t["phone"])
         for t in tracking.values()
-        if any(s in (t.get("status") or "").lower() for s in STOPPED_STATUSES)
+        if is_stopped_status(t.get("status"))
         and len(_norm_phone(t["phone"])) == 10
     }
     stopped_phones.discard("")
@@ -543,6 +589,7 @@ def process_sequences(service):
         tl_ref   = lead["tl_ref"].strip()
         campaign = lead["campaign"].strip()
         status   = lead["status"].lower().strip()
+        booking_pending = is_booking_pending(status)
 
         if not lead["phone"] or not tl_ref:
             continue
@@ -552,7 +599,7 @@ def process_sequences(service):
             continue
 
         # Skip if status indicates stop
-        if any(s in status for s in STOPPED_STATUSES):
+        if is_stopped_status(status):
             continue
 
         # Skip if this PERSON (by phone) is stopped under any other reference
@@ -579,8 +626,8 @@ def process_sequences(service):
         if not track:
             continue
 
-        # Skip if tracking says replied/completed
-        if track["status"].lower() in ("replied", "completed", "opted out"):
+        # Skip if tracking says replied/completed/otherwise stopped
+        if is_stopped_status(track["status"]):
             continue
 
         sequence     = get_sequence(campaign)
@@ -594,7 +641,10 @@ def process_sequences(service):
             continue
 
         next_msg = sequence[current_step]
-        due_at   = lead_date + datetime.timedelta(hours=next_msg["delay_hours"])
+        delay_hours = next_msg["delay_hours"]
+        if booking_pending and current_step == 0:
+            delay_hours = BOOKING_PENDING_DELAY_HOURS
+        due_at = lead_date + datetime.timedelta(hours=delay_hours)
 
         # Spacing gate: don't fire step N until the real gap since the PREVIOUS
         # step's actual send has elapsed. Stops backlog leads bursting through
@@ -623,6 +673,8 @@ def process_sequences(service):
                 last_sent  = now.strftime("%d/%m/%Y %H:%M")
                 update_tracking_row(service, track["row"], new_step, last_sent, new_status,
                                 tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
+                if booking_pending and current_step == 0:
+                    update_lead_status(service, lead, BOOKING_SEQUENCE_ACTIVE_STATUS)
                 messages_sent += 1
                 _bump_today()
                 log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']} (day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
@@ -706,7 +758,7 @@ def main():
     while True:
         try:
             creds = get_google_credentials()
-            sheets_service_global = build("sheets", "v4", credentials=creds)
+            sheets_service_global = build("sheets", "v4", credentials=creds, cache_discovery=False)
             ensure_tracking_sheet(sheets_service_global)
             start_webhook_server()
 
