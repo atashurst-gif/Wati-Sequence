@@ -192,7 +192,9 @@ STOPPED_STATUSES = {
     "replied", "completed", "opted out", "converted",
     "do not contact", "dnc", "dnq", "callback", "interested",
     "agreed", "lead passed", "verified", "moc set", "moc approved",
-    "cbna"
+    "cbna", "callback set", "call back", "cancelled money wellness",
+    "cancelled not interested (provide reason in notes)",
+    "transferred to non ip",
 }
 BOOKING_PENDING_STATUS = "booking pending"
 BOOKING_SEQUENCE_ACTIVE_STATUS = "sequence active"
