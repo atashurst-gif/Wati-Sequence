@@ -136,16 +136,32 @@ def _sync_today_from_tracking(tracking: dict):
     _daily_sends[today] = max(_daily_sends.get(today, 0), sent_today)
 
 HC_PING_URL = os.getenv("HC_PING_URL", "https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187")
+HEALTHCHECK_HEARTBEAT_SECONDS = int(os.getenv("HEALTHCHECK_HEARTBEAT_SECONDS", "240"))
 _read_failed = False  # set True by read-error handlers; checked at cycle end
+_healthcheck_heartbeat_started = False
 
 def ping(suffix=""):
-    """Ping healthcheck. suffix='/fail' marks the check failed (turns red + emails)."""
+    """Ping healthcheck. Keep this as liveness; detailed errors stay in logs/email."""
     if not HC_PING_URL:
         return
     try:
         requests.get(HC_PING_URL + suffix, timeout=10)
     except Exception:
         pass
+
+def start_healthcheck_heartbeat():
+    """Ping during long processing cycles so Healthchecks does not flap."""
+    global _healthcheck_heartbeat_started
+    if _healthcheck_heartbeat_started or not HC_PING_URL:
+        return
+    _healthcheck_heartbeat_started = True
+
+    def _loop():
+        while True:
+            time.sleep(HEALTHCHECK_HEARTBEAT_SECONDS)
+            ping()
+
+    threading.Thread(target=_loop, daemon=True).start()
 
 # ─────────────────────────────────────────────
 # Sequence Definitions
@@ -707,9 +723,8 @@ def process_sequences(service):
 
     log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent, {stopped_skips} phone-stopped skips ───")
     if _read_failed:
-        ping("/fail")  # a sheet read failed this cycle — turn check RED so we get alerted
-    else:
-        ping()         # healthy cycle — sheets read OK
+        log.warning("Sheet read issue this cycle; keeping Healthchecks as liveness to avoid false DOWN/UP alerts")
+    ping()
 
 # ─────────────────────────────────────────────
 # Webhook Server
@@ -784,6 +799,7 @@ def main():
             sheets_service_global = build("sheets", "v4", credentials=creds, cache_discovery=False)
             ensure_tracking_sheet(sheets_service_global)
             start_webhook_server()
+            start_healthcheck_heartbeat()
 
             log.info("Service started successfully.")
             consecutive_errors = 0
