@@ -100,11 +100,13 @@ CUTOFF_DATE = datetime.datetime(2026, 4, 15)
 ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o", "flt", "ukdt ct2"}
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "10"))  # per-cycle drip feed, not a burst
-MAX_SENDS_PER_HOUR = int(os.getenv("MAX_SENDS_PER_HOUR", "9"))  # spread catch-up through the day
-MAX_SENDS_PER_DAY = int(os.getenv("MAX_SENDS_PER_DAY", "80"))  # hard daily ceiling on actual sends
+MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "12"))  # per-cycle drip feed, not a burst
+MAX_SENDS_PER_HOUR = int(os.getenv("MAX_SENDS_PER_HOUR", "14"))  # measured total send pace
+MAX_SENDS_PER_DAY = int(os.getenv("MAX_SENDS_PER_DAY", "120"))  # hard daily ceiling on actual sends
+MAX_BACKLOG_SENDS_PER_DAY = int(os.getenv("MAX_BACKLOG_SENDS_PER_DAY", "80"))  # old due leads only
 _daily_sends = {}  # {date: count} — persists across cycles, auto-resets each day
 _hourly_sends = {}  # {(date, hour): count} — smooths backlog catch-up
+_backlog_sends = {}  # {date: count} — stops backlog starving new enquiries
 
 UK_TZ = ZoneInfo("Europe/London")
 
@@ -126,12 +128,30 @@ def _hour_sent():
     return _hourly_sends.get(key, 0)
 
 
-def _bump_today():
+def _backlog_sent():
+    """How many backlog sends so far today (UK date)."""
+    today = datetime.datetime.now(UK_TZ).date()
+    for d in list(_backlog_sends):
+        if d != today:
+            del _backlog_sends[d]
+    return _backlog_sends.get(today, 0)
+
+
+def _is_backlog_lead_date(lead_date):
+    """A backlog lead was added before today; today's leads get separate headroom."""
+    if not lead_date:
+        return False
+    return lead_date.date() < datetime.datetime.now(UK_TZ).date()
+
+
+def _bump_today(is_backlog=False):
     now = datetime.datetime.now(UK_TZ)
     today = now.date()
     _daily_sends[today] = _daily_sends.get(today, 0) + 1
     hour_key = (today, now.hour)
     _hourly_sends[hour_key] = _hourly_sends.get(hour_key, 0) + 1
+    if is_backlog:
+        _backlog_sends[today] = _backlog_sends.get(today, 0) + 1
 
 
 def _sync_today_from_tracking(tracking: dict):
@@ -141,6 +161,7 @@ def _sync_today_from_tracking(tracking: dict):
     current_hour = now.hour
     sent_today = 0
     sent_this_hour = 0
+    backlog_sent_today = 0
     for item in tracking.values():
         last_sent = item.get("last_sent") or ""
         if not last_sent:
@@ -153,8 +174,12 @@ def _sync_today_from_tracking(tracking: dict):
             sent_today += 1
             if sent_dt.hour == current_hour:
                 sent_this_hour += 1
+            lead_date = parse_lead_date(item.get("lead_date", ""))
+            if _is_backlog_lead_date(lead_date):
+                backlog_sent_today += 1
     _daily_sends[today] = max(_daily_sends.get(today, 0), sent_today)
     _hourly_sends[(today, current_hour)] = max(_hourly_sends.get((today, current_hour), 0), sent_this_hour)
+    _backlog_sends[today] = max(_backlog_sends.get(today, 0), backlog_sent_today)
 
 HC_PING_URL = os.getenv("HC_PING_URL", "https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187")
 HEALTHCHECK_HEARTBEAT_SECONDS = int(os.getenv("HEALTHCHECK_HEARTBEAT_SECONDS", "240"))
@@ -655,20 +680,23 @@ def process_sequences(service):
             delay_hours = BOOKING_PENDING_DELAY_HOURS
         due_at = lead_date + datetime.timedelta(hours=delay_hours)
 
-        if track is None:
-            bucket = 0                  # enrol missing eligible leads first
+        if lead_date.date() == datetime.datetime.now(UK_TZ).date():
+            bucket = 0                  # today's live leads before catch-up work
+        elif track is None:
+            bucket = 1                  # enrol missing eligible leads first
         elif is_booking_pending(status) and current_step == 0:
-            bucket = 1                  # W0W fallback leads get first W1 priority
+            bucket = 2                  # W0W fallback leads before older backlog
         elif current_step == 0:
-            bucket = 2                  # ordinary W1 before older later-step backlog
+            bucket = 3                  # ordinary W1 before later-step backlog
         else:
-            bucket = 3
+            bucket = 4
         return (bucket, due_at, lead_date, tl_ref)
 
     new_leads_added = 0
     messages_sent   = 0
     stopped_skips   = 0
     daily_cap_logged = False
+    backlog_cap_logged = False
     hourly_cap_logged = False
     cycle_cap_logged = False
 
@@ -763,6 +791,12 @@ def process_sequences(service):
                     log.info(f"Hourly cap reached ({MAX_SENDS_PER_HOUR}) - catch-up paced, enrolment continues")
                     hourly_cap_logged = True
                 continue
+            is_backlog_send = _is_backlog_lead_date(lead_date)
+            if is_backlog_send and _backlog_sent() >= MAX_BACKLOG_SENDS_PER_DAY:
+                if not backlog_cap_logged:
+                    log.info(f"Backlog cap reached ({MAX_BACKLOG_SENDS_PER_DAY}) - today/new leads still allowed")
+                    backlog_cap_logged = True
+                continue
             if _today_sent() >= MAX_SENDS_PER_DAY:
                 if not daily_cap_logged:
                     log.info(f"Daily cap reached ({MAX_SENDS_PER_DAY}) - sends paused, enrolment continues")
@@ -778,8 +812,8 @@ def process_sequences(service):
                 if booking_pending and current_step == 0:
                     update_lead_status(service, lead, BOOKING_SEQUENCE_ACTIVE_STATUS)
                 messages_sent += 1
-                _bump_today()
-                log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']} (hour total: {_hour_sent()}/{MAX_SENDS_PER_HOUR}, day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
+                _bump_today(is_backlog_send)
+                log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']} (hour total: {_hour_sent()}/{MAX_SENDS_PER_HOUR}, backlog total: {_backlog_sent()}/{MAX_BACKLOG_SENDS_PER_DAY}, day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
         else:
             hrs = (due_at - now).total_seconds() / 3600
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
