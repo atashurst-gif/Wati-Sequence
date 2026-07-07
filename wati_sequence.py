@@ -102,8 +102,8 @@ ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o", "flt", "ukdt ct2"}
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "12"))  # per-cycle drip feed, not a burst
 MAX_SENDS_PER_HOUR = int(os.getenv("MAX_SENDS_PER_HOUR", "14"))  # measured total send pace
-MAX_SENDS_PER_DAY = int(os.getenv("MAX_SENDS_PER_DAY", "120"))  # hard daily ceiling on actual sends
-MAX_BACKLOG_SENDS_PER_DAY = int(os.getenv("MAX_BACKLOG_SENDS_PER_DAY", "80"))  # old due leads only
+MAX_SENDS_PER_DAY = int(os.getenv("MAX_SENDS_PER_DAY", "145"))  # hard daily ceiling on actual sends
+MAX_BACKLOG_SENDS_PER_DAY = int(os.getenv("MAX_BACKLOG_SENDS_PER_DAY", "130"))  # allows roughly 40 more backlog today
 _daily_sends = {}  # {date: count} — persists across cycles, auto-resets each day
 _hourly_sends = {}  # {(date, hour): count} — smooths backlog catch-up
 _backlog_sends = {}  # {date: count} — stops backlog starving new enquiries
@@ -685,17 +685,23 @@ def process_sequences(service):
             delay_hours = BOOKING_PENDING_DELAY_HOURS
         due_at = lead_date + datetime.timedelta(hours=delay_hours)
 
-        if lead_date.date() == datetime.datetime.now(UK_TZ).date():
+        is_today_lead = lead_date.date() == datetime.datetime.now(UK_TZ).date()
+        if is_today_lead:
             bucket = 0                  # today's live leads before catch-up work
+            freshness = lead_date.timestamp()
         elif track is None:
             bucket = 1                  # enrol missing eligible leads first
+            freshness = -lead_date.timestamp()
         elif is_booking_pending(status) and current_step == 0:
             bucket = 2                  # W0W fallback leads before older backlog
+            freshness = -lead_date.timestamp()
         elif current_step == 0:
             bucket = 3                  # ordinary W1 before later-step backlog
+            freshness = -lead_date.timestamp()
         else:
             bucket = 4
-        return (bucket, due_at, lead_date, tl_ref)
+            freshness = -lead_date.timestamp()
+        return (bucket, due_at, freshness, tl_ref)
 
     new_leads_added = 0
     messages_sent   = 0
