@@ -598,13 +598,11 @@ def process_sequences(service):
     new_leads_added = 0
     messages_sent   = 0
     stopped_skips   = 0
+    daily_cap_logged = False
 
     for lead in leads:
         if messages_sent >= MAX_SENDS_PER_CYCLE:
             log.info(f"Cycle cap reached ({MAX_SENDS_PER_CYCLE}) — remaining leads next cycle")
-            break
-        if _today_sent() >= MAX_SENDS_PER_DAY:
-            log.info(f"Daily cap reached ({MAX_SENDS_PER_DAY}) — backlog spreads to following days, no spike")
             break
         tl_ref   = lead["tl_ref"].strip()
         campaign = lead["campaign"].strip()
@@ -685,6 +683,11 @@ def process_sequences(service):
             # New leads still get instant W0 from the poller (separate service).
             if not is_within_sending_window():
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
+                continue
+            if _today_sent() >= MAX_SENDS_PER_DAY:
+                if not daily_cap_logged:
+                    log.info(f"Daily cap reached ({MAX_SENDS_PER_DAY}) - sends paused, enrolment continues")
+                    daily_cap_logged = True
                 continue
 
             if send_wati_template(lead["phone"], next_msg["template"], lead["first_name"]):
