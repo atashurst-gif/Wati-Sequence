@@ -25,6 +25,7 @@ import threading
 from email.mime.text import MIMEText
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
@@ -103,19 +104,37 @@ MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "30"))  # throttle ba
 MAX_SENDS_PER_DAY = int(os.getenv("MAX_SENDS_PER_DAY", "80"))  # hard daily ceiling — flattens Monday backlog spike
 _daily_sends = {}  # {date: count} — persists across cycles, auto-resets each day
 
+UK_TZ = ZoneInfo("Europe/London")
+
 def _today_sent():
     """How many sends so far today (UK date). Auto-prunes old days."""
-    import datetime as _dt
-    today = _dt.date.today()
+    today = datetime.datetime.now(UK_TZ).date()
     for d in list(_daily_sends):
         if d != today:
             del _daily_sends[d]
     return _daily_sends.get(today, 0)
 
 def _bump_today():
-    import datetime as _dt
-    today = _dt.date.today()
+    today = datetime.datetime.now(UK_TZ).date()
     _daily_sends[today] = _daily_sends.get(today, 0) + 1
+
+
+def _sync_today_from_tracking(tracking: dict):
+    """Seed the daily cap from persisted tracking so redeploys cannot reset it."""
+    today = datetime.datetime.now(UK_TZ).date()
+    sent_today = 0
+    for item in tracking.values():
+        last_sent = item.get("last_sent") or ""
+        if not last_sent:
+            continue
+        try:
+            sent_date = datetime.datetime.strptime(last_sent, "%d/%m/%Y %H:%M").date()
+        except ValueError:
+            continue
+        if sent_date == today:
+            sent_today += 1
+    _daily_sends[today] = max(_daily_sends.get(today, 0), sent_today)
+
 HC_PING_URL = os.getenv("HC_PING_URL", "https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187")
 _read_failed = False  # set True by read-error handlers; checked at cycle end
 
@@ -559,6 +578,7 @@ def process_sequences(service):
     now      = datetime.datetime.now()
     leads    = get_all_leads(service)
     tracking = get_tracking_data(service)
+    _sync_today_from_tracking(tracking)
     log.info(f"{len(leads)} leads in sheet | {len(tracking)} in tracking")
 
     # Phone-level dedup: if a person is stopped under ANY reference (TL/FLT,
