@@ -221,6 +221,9 @@ UKDT_SEQUENCE = [
     {"step": 5, "template": "ukdt_nc5", "delay_hours": 120},
     {"step": 6, "template": "ukdt_nc6", "delay_hours": 168},
     {"step": 7, "template": "ukdt_nc7", "delay_hours": 216},
+    {"step": 8, "template": "ukdt_nc8", "delay_hours": 288},
+    {"step": 9, "template": "ukdt_nc9", "delay_hours": 360},
+    {"step": 10, "template": "ukdt_nc10", "delay_hours": 432},
 ]
 
 BST_SEQUENCE = [
@@ -232,6 +235,8 @@ BST_SEQUENCE = [
     {"step": 6, "template": "bst_nc_6", "delay_hours": 168},
     {"step": 7, "template": "bst_nc7",  "delay_hours": 216},
     {"step": 8, "template": "bst_nc8",  "delay_hours": 288},
+    {"step": 9, "template": "bst_nc9",  "delay_hours": 360},
+    {"step": 10, "template": "bst_nc10", "delay_hours": 432},
 ]
 
 STOPPED_STATUSES = {
