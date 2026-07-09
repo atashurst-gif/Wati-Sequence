@@ -878,11 +878,14 @@ def process_sequences(service):
                 new_step   = current_step + 1
                 new_status = "completed" if new_step >= len(sequence) else "active"
                 last_sent  = now.strftime("%d/%m/%Y %H:%M")
+                # Advance the sequence step + write last_sent for EVERY lead,
+                # including W0-sourced ones. Previously W0-sourced leads only had
+                # their W0-tracking status stamped and never advanced current_step,
+                # so they re-qualified for nc1 every cycle and were re-sent on a loop.
+                update_tracking_row(service, track["row"], new_step, last_sent, new_status,
+                                    tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
                 if source_is_w0:
                     update_w0_tracking_status(service, lead["phone"], "replied" if new_step >= len(sequence) else "w0 sent")
-                else:
-                    update_tracking_row(service, track["row"], new_step, last_sent, new_status,
-                                    tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
                 if booking_pending and current_step == 0 and not source_is_w0:
                     update_lead_status(service, lead, BOOKING_SEQUENCE_ACTIVE_STATUS)
                 messages_sent += 1
