@@ -96,6 +96,15 @@ def get_credentials():
 
 def parse_enquiry_date(s: str):
     s = str(s).strip()
+    if not s:
+        return None
+    try:
+        serial = float(s)
+        if 20000 < serial < 80000:
+            epoch = datetime.datetime(1899, 12, 30, tzinfo=UK_TZ)
+            return epoch + datetime.timedelta(days=serial)
+    except (ValueError, TypeError):
+        pass
     for f in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M:%S",
               "%d/%m/%Y %H:%M", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
               "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
