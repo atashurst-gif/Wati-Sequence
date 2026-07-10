@@ -6,6 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY wati_sequence.py .
+COPY declan_sequence.py .
 
 EXPOSE 8080
 
