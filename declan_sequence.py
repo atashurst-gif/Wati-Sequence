@@ -53,7 +53,7 @@ DRY_RUN       = os.getenv("DECLAN_DRY_RUN", "1") == "1"   # SAFE DEFAULT: dry ru
 # day_offset is days AFTER the enquiry day (enquiry day = offset 0).
 # A step is due when now >= enquiry_date + day_offset days, at >= hour:00 local.
 SEQUENCE = [
-    (0, "bst_w0",          0,  0),   # immediate
+    (0, "__SKIP__",        0,  0),   # W0 handled by poller — sequence skips this step
     (1, "bailiff_eod",     0,  20),  # 8pm same day
     (2, "day_2_midday",    1,  13),  # 1pm next day
     (3, "bailiff_day_3",   2,  13),  # 1pm day 3
@@ -210,6 +210,16 @@ def process(svc):
 
         step_no, template = due
         first_name = str(name).split()[0].title() if name and "@" not in str(name) else "there"
+
+        # W0 is sent by the poller, not the sequence. Advance past the skip step without sending.
+        if template == "__SKIP__":
+            new_step = current_step + 1
+            stamp = now.strftime("%d/%m/%Y %H:%M")
+            svc.spreadsheets().values().update(
+                spreadsheetId=SHEET_ID, range=f"'{TAB}'!E{i}:F{i}",
+                valueInputOption="RAW", body={"values": [[str(new_step), stamp]]}
+            ).execute()
+            continue
 
         if send_declan_template(number, template, first_name):
             sent += 1
