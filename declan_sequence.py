@@ -140,7 +140,17 @@ def send_declan_template(phone: str, template_name: str, first_name: str) -> boo
         return False
 
 
+def declan_effective_day(enquiry_dt):
+    """Declan's day runs 08:00-20:00. An enquiry after 20:00 counts as the NEXT day
+    (its 8pm eod and whole sequence start the following day)."""
+    if enquiry_dt.hour >= 20:
+        nextday = enquiry_dt + datetime.timedelta(days=1)
+        return nextday.replace(hour=8, minute=0, second=0, microsecond=0)
+    return enquiry_dt
+
+
 def due_step(enquiry_dt, current_step, now):
+    enquiry_dt = declan_effective_day(enquiry_dt)
     """Return the next step dict that is due, or None."""
     if current_step >= len(SEQUENCE):
         return None
