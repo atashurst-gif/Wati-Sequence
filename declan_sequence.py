@@ -122,17 +122,32 @@ def send_declan_template(phone: str, template_name: str, first_name: str) -> boo
         return True
     url = f"{WATI_API_URL_DECLAN}/api/v2/sendTemplateMessages"
     headers = {"Authorization": f"Bearer {WATI_TOKEN_DECLAN}", "Content-Type": "application/json"}
+    # Templates differ: some need a {{name}} param, some have none.
+    # Sending params to a no-param template is rejected, and vice versa.
+    NAME_PARAM_TEMPLATES = {"bailiff_eod", "bailiff_day_3", "bailiff_day_7", "day_2_midday"}
+    if template_name in NAME_PARAM_TEMPLATES:
+        receiver = {"whatsappNumber": formatted,
+                    "customParams": [{"name": "name", "value": first_name}]}
+    else:
+        receiver = {"whatsappNumber": formatted}
     payload = {
         "template_name": template_name,
         "broadcast_name": f"decseq_{template_name}_{formatted[-4:]}",
-        "receivers": [{"whatsappNumber": formatted,
-                       "customParams": [{"name": "first_name", "value": first_name}]}],
+        "receivers": [receiver],
     }
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=30)
         if r.status_code in (200, 201):
-            log.info(f"\u2713 Sent {template_name} to {formatted} ({first_name})")
-            return True
+            try:
+                body = r.json()
+            except Exception:
+                body = {}
+            # WATI returns HTTP 200 even on rejection — the real result is in the body.
+            if body.get("result") is True:
+                log.info(f"\u2713 Sent {template_name} to {formatted} ({first_name})")
+                return True
+            log.error(f"Declan WATI accepted-but-REJECTED {template_name} for {formatted}: {str(body)[:250]}")
+            return False
         log.error(f"Declan WATI {r.status_code} for {formatted}: {r.text[:200]}")
         return False
     except Exception as e:
