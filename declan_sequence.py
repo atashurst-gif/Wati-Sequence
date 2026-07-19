@@ -128,9 +128,12 @@ def parse_enquiry_date(s: str):
             return epoch + datetime.timedelta(days=serial)
     except (ValueError, TypeError):
         pass
-    for f in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M:%S",
-              "%d/%m/%Y %H:%M", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
-              "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+    # NOTE: the AUTOMATION tabs store dates US-style M/D/YYYY (e.g. 7/13/2026 = 13 July),
+    # so month-first patterns are tried FIRST. UK d/m patterns follow as a fallback.
+    for f in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y",
+              "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+              "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d-%m-%Y %H:%M:%S",
+              "%d-%m-%Y %H:%M", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
             return datetime.datetime.strptime(s, f).replace(tzinfo=UK_TZ)
         except ValueError:
