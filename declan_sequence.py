@@ -266,6 +266,9 @@ def process_campaign(svc, campaign, now):
 
         # W0 sent by poller — advance past skip step without sending.
         if template == "__SKIP__":
+            if DRY_RUN:
+                log.info(f"[{cname}] [DRY RUN] would advance {number} past __SKIP__ (no write)")
+                continue
             new_step = current_step + 1
             stamp = now.strftime("%d/%m/%Y %H:%M")
             svc.spreadsheets().values().update(
@@ -276,6 +279,9 @@ def process_campaign(svc, campaign, now):
 
         if send_declan_template(number, template, first_name, name_params):
             sent += 1
+            if DRY_RUN:
+                # dry run: log intent only, do NOT advance step or stamp the sheet
+                continue
             _bump_daily()
             new_step = current_step + 1
             stamp = now.strftime("%d/%m/%Y %H:%M")
