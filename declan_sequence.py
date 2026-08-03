@@ -193,9 +193,12 @@ def due_step(enquiry_dt, current_step, now, sequence):
     step_no, template, day_offset, hour = sequence[current_step]
     due_at = (enquiry_dt + datetime.timedelta(days=day_offset)).replace(
         hour=hour, minute=0, second=0, microsecond=0)
-    if now >= due_at:
-        return (step_no, template)
-    return None
+    if now < due_at:
+        return None
+    # Same-day only: a step missed on its due day is dropped, not sent late.
+    if now.date() > due_at.date():
+        return (step_no, "__STALE__")
+    return (step_no, template)
 
 
 def within_window(now):
@@ -265,6 +268,19 @@ def process_campaign(svc, campaign, now):
         first_name = str(name).split()[0].title() if name and "@" not in str(name) else "there"
 
         # W0 sent by poller — advance past skip step without sending.
+        if template == "__STALE__":
+            if DRY_RUN:
+                log.info(f"[{cname}] [DRY RUN] would skip stale step {step_no} for {number}")
+                continue
+            new_step = current_step + 1
+            stamp = now.strftime("%d/%m/%Y %H:%M")
+            svc.spreadsheets().values().update(
+                spreadsheetId=SHEET_ID, range=f"'{tab}'!E{i}:F{i}",
+                valueInputOption="RAW", body={"values": [[str(new_step), stamp]]}
+            ).execute()
+            log.info(f"[{cname}] row {i}: step {step_no} stale, advanced without sending")
+            continue
+
         if template == "__SKIP__":
             if DRY_RUN:
                 log.info(f"[{cname}] [DRY RUN] would advance {number} past __SKIP__ (no write)")
