@@ -80,9 +80,35 @@ BST_NAME_PARAMS = {"bailiff_eod", "bailiff_day_3", "bailiff_day_7", "day_2_midda
 CT_NAME_PARAMS  = {"ct_eod", "ct_day_2_midday", "ct_day3", "ct_day7", "ct_day14"}
 # ct_day5 and ct_day11 take NO param.
 
+DHD_CT_SEQUENCE = [
+    (0, "__SKIP__",       0,  0),   # lg_dhd_w0 handled by poller
+    (1, "dhd_eod_all",    0,  20),
+    (2, "dhd_ct_day2",    1,  13),
+    (3, "dhd_ct_day3",    2,  11),
+    (4, "dhd_ct_day5",    4,  13),
+    (5, "dhd_ct_day7",    6,  20),
+    (6, "dhd_ct_day11",   10, 13),
+]
+
+DHD_BAI_SEQUENCE = [
+    (0, "__SKIP__",       0,  0),
+    (1, "dhd_eod_all",    0,  20),
+    (2, "dhd_bai_day2",   1,  13),
+    (3, "dhd_bai_day3",   2,  11),
+    (4, "dhd_bai_day5",   4,  13),
+    (5, "dhd_bai_day7",   6,  20),
+    (6, "dhd_bai_day11",  10, 13),
+]
+
+# day3 takes no param; the rest take {{name}}.
+DHD_CT_NAME_PARAMS  = {"dhd_eod_all", "dhd_ct_day2", "dhd_ct_day5", "dhd_ct_day7", "dhd_ct_day11"}
+DHD_BAI_NAME_PARAMS = {"dhd_eod_all", "dhd_bai_day2", "dhd_bai_day5", "dhd_bai_day7", "dhd_bai_day11"}
+
 CAMPAIGNS = [
     {"name": "BST",  "tab": "BST AUTOMATION",  "sequence": BST_SEQUENCE, "name_params": BST_NAME_PARAMS},
     {"name": "UKDT", "tab": "UKDT AUTOMATION", "sequence": CT_SEQUENCE,  "name_params": CT_NAME_PARAMS},
+    {"name": "DHD_CT",  "tab": "DHD CT AUTOMATION",  "sequence": DHD_CT_SEQUENCE,  "name_params": DHD_CT_NAME_PARAMS},
+    {"name": "DHD_BAI", "tab": "DHD BAI AUTOMATION", "sequence": DHD_BAI_SEQUENCE, "name_params": DHD_BAI_NAME_PARAMS},
 ]
 
 STOP_STATUS = "contacted"
