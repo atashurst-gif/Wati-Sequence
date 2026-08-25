@@ -101,8 +101,25 @@ DHD_BAI_SEQUENCE = [
 ]
 
 # day3 takes no param; the rest take {{name}}.
-DHD_CT_NAME_PARAMS  = {"dhd_eod_all", "dhd_ct_day2", "dhd_ct_day5", "dhd_ct_day7", "dhd_ct_day11"}
-DHD_BAI_NAME_PARAMS = {"dhd_eod_all", "dhd_bai_day2", "dhd_bai_day5", "dhd_bai_day7", "dhd_bai_day11"}
+# Verified against WATI 25/08: CT set + eod use first_name; BAI set is mixed.
+# Verified against WATI 25/08/2026 - the DHD templates mix conventions, so the
+# param name is pinned per template. None = send with no params at all.
+PARAM_OVERRIDE = {
+    "dhd_eod_all":   "first_name",
+    "dhd_ct_day2":   "first_name",
+    "dhd_ct_day3":   None,
+    "dhd_ct_day5":   "first_name",
+    "dhd_ct_day7":   "first_name",
+    "dhd_ct_day11":  "first_name",
+    "dhd_bai_day2":  "name",
+    "dhd_bai_day3":  "first_name",
+    "dhd_bai_day5":  None,
+    "dhd_bai_day7":  "name",
+    "dhd_bai_day11": "first_name",
+}
+
+DHD_CT_NAME_PARAMS  = set()
+DHD_BAI_NAME_PARAMS = set()
 
 CAMPAIGNS = [
     {"name": "BST",  "tab": "BST AUTOMATION",  "sequence": BST_SEQUENCE, "name_params": BST_NAME_PARAMS},
@@ -174,7 +191,12 @@ def send_declan_template(phone: str, template_name: str, first_name: str, name_p
         return True
     url = f"{WATI_API_URL_DECLAN}/api/v2/sendTemplateMessages"
     headers = {"Authorization": f"Bearer {WATI_TOKEN_DECLAN}", "Content-Type": "application/json"}
-    if template_name in name_params:
+    if template_name in PARAM_OVERRIDE:
+        pname = PARAM_OVERRIDE[template_name]
+        receiver = {"whatsappNumber": formatted}
+        if pname:
+            receiver["customParams"] = [{"name": pname, "value": first_name}]
+    elif template_name in name_params:
         receiver = {"whatsappNumber": formatted,
                     "customParams": [{"name": "name", "value": first_name}]}
     else:
