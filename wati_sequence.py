@@ -215,23 +215,25 @@ def start_healthcheck_heartbeat():
 # ─────────────────────────────────────────────
 
 UKDT_SEQUENCE = [
-    {"step": 1, "template": "ukdt_nc1", "delay_hours": 0},
-    {"step": 2, "template": "ukdt_nc2", "delay_hours": 24},
-    {"step": 3, "template": "ukdt_nc3", "delay_hours": 48},
-    {"step": 4, "template": "ukdt_nc4", "delay_hours": 72},
-    {"step": 5, "template": "ukdt_nc5", "delay_hours": 120},
-    {"step": 6, "template": "ukdt_nc6", "delay_hours": 168},
+    # Rebuilt 26/08/2026. Step 1 = 20:00 EOD on the enquiry day (rolled if the
+    # enquiry was after 20:00, or if it would land on a Saturday). Old nc1-nc6 retired.
+    {"step": 1, "template": "eod_all",  "at_hour": 20},
+    {"step": 2, "template": "ukdt_fu1", "delay_hours": 24},
+    {"step": 3, "template": "ukdt_fu2", "delay_hours": 72},
+    {"step": 4, "template": "ukdt_fu3", "delay_hours": 120},
+    {"step": 5, "template": "ukdt_fu4", "delay_hours": 168},
+    {"step": 6, "template": "ukdt_fu5", "delay_hours": 192},
     # Steps 7-10 retired Aug 2026: ~4% reply rate across ~1,800 sends and the
     # main driver of the WhatsApp quality drop to Medium. Sequence ends at 6.
 ]
 
 BST_SEQUENCE = [
-    {"step": 1, "template": "bst_nc1",  "delay_hours": 0},
-    {"step": 2, "template": "bst_nc2",  "delay_hours": 24},
-    {"step": 3, "template": "bst_nc3",  "delay_hours": 48},
-    {"step": 4, "template": "bst_nc4",  "delay_hours": 72},
-    {"step": 5, "template": "bst_nc_5", "delay_hours": 120},
-    {"step": 6, "template": "bst_nc_6", "delay_hours": 168},
+    {"step": 1, "template": "eod_all", "at_hour": 20},
+    {"step": 2, "template": "bst_fu1",  "delay_hours": 24},
+    {"step": 3, "template": "bst_fu2",  "delay_hours": 72},
+    {"step": 4, "template": "bst_fu3",  "delay_hours": 120},
+    {"step": 5, "template": "bst_fu4",  "delay_hours": 168},
+    {"step": 6, "template": "bst_fu5",  "delay_hours": 192},
     # Steps 7-10 retired Aug 2026 - see UKDT_SEQUENCE note above.
 ]
 
@@ -250,6 +252,30 @@ BOOKING_PENDING_DELAY_HOURS = int(os.getenv("BOOKING_PENDING_DELAY_HOURS", "4"))
 # ─────────────────────────────────────────────
 # Sending Window Logic
 # ─────────────────────────────────────────────
+
+def step_due_at(step_cfg, lead_date, fallback_hours=None):
+    """When is this step due?
+
+    at_hour steps fire at a fixed clock time on the enquiry day, EXCEPT:
+      - enquiry already past that hour -> next day
+      - lands on a Saturday            -> Sunday
+    The EOD copy says "tomorrow" and the office is open Mon-Sat, so a Saturday
+    send would promise a Sunday call. Saturday and Sunday enquiries therefore
+    both fire Sunday 20:00, pointing at Monday.
+    """
+    if fallback_hours is not None:
+        return lead_date + datetime.timedelta(hours=fallback_hours)
+    if "at_hour" not in step_cfg:
+        return lead_date + datetime.timedelta(hours=step_cfg["delay_hours"])
+
+    due = lead_date.replace(hour=step_cfg["at_hour"], minute=0,
+                            second=0, microsecond=0)
+    if lead_date >= due:                 # enquiry came in after the send hour
+        due = due + datetime.timedelta(days=1)
+    if due.weekday() == 5:               # Saturday -> hold to Sunday
+        due = due + datetime.timedelta(days=1)
+    return due
+
 
 def get_next_send_time(now: datetime.datetime) -> datetime.datetime:
     """
@@ -724,13 +750,12 @@ def process_sequences(service):
         if current_step >= len(sequence):
             return (8, datetime.datetime.max, lead_date, tl_ref)
 
+        override_h = None
         if source_is_w0 and current_step == 0:
-            delay_hours = BOOKING_PENDING_DELAY_HOURS if is_booking_pending(status) else 24
-        else:
-            delay_hours = sequence[current_step]["delay_hours"]
+            override_h = BOOKING_PENDING_DELAY_HOURS if is_booking_pending(status) else 24
         if is_booking_pending(status) and current_step == 0 and not source_is_w0:
-            delay_hours = BOOKING_PENDING_DELAY_HOURS
-        due_at = lead_date + datetime.timedelta(hours=delay_hours)
+            override_h = BOOKING_PENDING_DELAY_HOURS
+        due_at = step_due_at(sequence[current_step], lead_date, override_h)
 
         is_today_lead = lead_date.date() == today_uk
         if is_today_lead:
@@ -819,19 +844,20 @@ def process_sequences(service):
             continue
 
         next_msg = sequence[current_step]
+        override_h = None
         if source_is_w0 and current_step == 0:
-            delay_hours = BOOKING_PENDING_DELAY_HOURS if booking_pending else 24
-        else:
-            delay_hours = next_msg["delay_hours"]
+            override_h = BOOKING_PENDING_DELAY_HOURS if booking_pending else 24
         if booking_pending and current_step == 0 and not source_is_w0:
-            delay_hours = BOOKING_PENDING_DELAY_HOURS
-        due_at = lead_date + datetime.timedelta(hours=delay_hours)
+            override_h = BOOKING_PENDING_DELAY_HOURS
+        due_at = step_due_at(next_msg, lead_date, override_h)
 
         # Spacing gate: don't fire step N until the real gap since the PREVIOUS
         # step's actual send has elapsed. Stops backlog leads bursting through
         # multiple steps in minutes. Normally-paced leads are unaffected.
-        prev_delay = sequence[current_step - 1]["delay_hours"] if current_step > 0 else 0
-        required_gap_h = next_msg["delay_hours"] - prev_delay
+        # at_hour steps have no delay_hours - treat as 0 so the gap gate is a no-op.
+        prev_delay = (sequence[current_step - 1].get("delay_hours", 0)
+                      if current_step > 0 else 0)
+        required_gap_h = next_msg.get("delay_hours", 0) - prev_delay
         last_sent_str = track.get("last_sent", "")
         if current_step > 0 and last_sent_str:
             try:
@@ -844,7 +870,8 @@ def process_sequences(service):
         if now >= due_at:
             # All steps (incl W1) respect business hours — no out-of-hours sends.
             # New leads still get instant W0 from the poller (separate service).
-            if not is_within_sending_window():
+            # the 20:00 EOD is deliberately outside the 09:00-18:00 window.
+            if "at_hour" not in next_msg and not is_within_sending_window():
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
                 continue
             if messages_sent >= MAX_SENDS_PER_CYCLE:
