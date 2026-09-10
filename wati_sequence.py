@@ -874,12 +874,17 @@ def process_sequences(service):
             if "at_hour" not in next_msg and not is_within_sending_window():
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
                 continue
-            if messages_sent >= MAX_SENDS_PER_CYCLE:
+            # at_hour steps (the 20:00 EOD) bypass the cycle and hourly caps so
+            # a same-day message never queues behind fu catch-up and lands the
+            # next day. They still count toward, and are bounded by, the daily
+            # and backlog caps below.
+            is_at_hour = "at_hour" in next_msg
+            if not is_at_hour and messages_sent >= MAX_SENDS_PER_CYCLE:
                 if not cycle_cap_logged:
                     log.info(f"Cycle cap reached ({MAX_SENDS_PER_CYCLE}) - sends paused, enrolment continues")
                     cycle_cap_logged = True
                 continue
-            if _hour_sent() >= MAX_SENDS_PER_HOUR:
+            if not is_at_hour and _hour_sent() >= MAX_SENDS_PER_HOUR:
                 if not hourly_cap_logged:
                     log.info(f"Hourly cap reached ({MAX_SENDS_PER_HOUR}) - catch-up paced, enrolment continues")
                     hourly_cap_logged = True
