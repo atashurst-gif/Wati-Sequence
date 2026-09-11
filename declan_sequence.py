@@ -41,6 +41,23 @@ log = logging.getLogger("declan_seq")
 UK_TZ = ZoneInfo("Europe/London")
 
 SHEET_ID = "1FsEIcfd8eY3muNLbTd31qBEcT0irKYz5dNUAffaSoJA"
+CALLBACKS_SHEET_ID = os.getenv("DECLAN_CB_SHEET_ID", "1cdNzI9P8fe0ejREZtm26ZIWgdi7atAyHHmOlckxRDHU")
+
+def _last9(v):
+    d = "".join(c for c in str(v) if c.isdigit())
+    return d[-9:] if len(d) >= 9 else None
+
+def load_booked_phones(svc) -> set:
+    """Phones with a row in the DHD CALLBACKS tab. A booked client is out of
+    the nurture sequence regardless of STATUS, so nobody chases them after
+    they have booked. Read failure -> empty set (fail open, never block)."""
+    try:
+        rows = svc.spreadsheets().values().get(
+            spreadsheetId=CALLBACKS_SHEET_ID, range="'CALLBACKS'!D:D").execute().get("values", [])
+        return {_last9(r[0]) for r in rows[1:] if r and _last9(r[0])}
+    except Exception as e:
+        log.warning(f"could not read CALLBACKS for booked-stop: {e}")
+        return set()
 
 WATI_API_URL_DECLAN = os.getenv("WATI_API_URL_DECLAN", "https://live-mt-server.wati.io/10188789")
 WATI_TOKEN_DECLAN   = os.getenv("WATI_TOKEN_DECLAN", "")
@@ -277,6 +294,7 @@ def process_campaign(svc, campaign, now):
 
     if not rows:
         return 0
+    booked = load_booked_phones(svc)
     sent = 0
     stopped = 0
     for i, r in enumerate(rows[1:], start=2):  # row 1 = header
@@ -289,6 +307,9 @@ def process_campaign(svc, campaign, now):
         if not number or not str(number).strip():
             continue
         if STOP_STATUS in status:
+            stopped += 1
+            continue
+        if _last9(number) in booked:
             stopped += 1
             continue
 
