@@ -871,7 +871,19 @@ def process_sequences(service):
             # All steps (incl W1) respect business hours — no out-of-hours sends.
             # New leads still get instant W0 from the poller (separate service).
             # the 20:00 EOD is deliberately outside the 09:00-18:00 window.
-            if "at_hour" not in next_msg and not is_within_sending_window():
+            if "at_hour" in next_msg:
+                # EOD only ever goes out in its own hour (20:xx). Never 2am, never
+                # 10pm. If it's been missed by more than a day the "today" copy is
+                # wrong, so advance to the next step without sending it.
+                if now.hour != next_msg["at_hour"]:
+                    _late = (now.replace(tzinfo=None) - due_at.replace(tzinfo=None)).total_seconds()
+                    if _late > 30 * 3600:
+                        update_tracking_row(service, track["row"], current_step + 1,
+                                            track.get("last_sent", ""), "active",
+                                            tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
+                        log.info(f"{tl_ref}: eod missed by >1 day, skipped without sending")
+                    continue
+            elif not is_within_sending_window():
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
                 continue
             # at_hour steps (the 20:00 EOD) bypass the cycle and hourly caps so
