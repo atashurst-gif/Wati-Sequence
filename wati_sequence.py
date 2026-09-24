@@ -875,7 +875,7 @@ def process_sequences(service):
                 # EOD only ever goes out in its own hour (20:xx). Never 2am, never
                 # 10pm. If it's been missed by more than a day the "today" copy is
                 # wrong, so advance to the next step without sending it.
-                if now.hour != next_msg["at_hour"]:
+                if datetime.datetime.now(UK_TZ).hour != next_msg["at_hour"]:
                     _late = (now.replace(tzinfo=None) - due_at.replace(tzinfo=None)).total_seconds()
                     if _late > 30 * 3600:
                         update_tracking_row(service, track["row"], current_step + 1,
