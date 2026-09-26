@@ -245,8 +245,11 @@ def send_declan_template(phone: str, template_name: str, first_name: str, name_p
 def declan_effective_day(enquiry_dt):
     """Declan's day runs 08:00-20:00. An enquiry after 20:00 counts as the NEXT day."""
     if enquiry_dt.hour >= 20:
-        nextday = enquiry_dt + datetime.timedelta(days=1)
-        return nextday.replace(hour=8, minute=0, second=0, microsecond=0)
+        enquiry_dt = (enquiry_dt + datetime.timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+    # 26/09: no EOD Fri/Sat/Sun. Anything landing on Fri, Sat or Sun (incl. Thu
+    # after 20:00) becomes a Monday 08:00 lead: EOD Mon 20:00, day 2 Tuesday...
+    if os.getenv("DECLAN_WEEKEND_TO_MONDAY", "1") == "1" and enquiry_dt.weekday() >= 4:
+        enquiry_dt = (enquiry_dt + datetime.timedelta(days=7 - enquiry_dt.weekday())).replace(hour=8, minute=0, second=0, microsecond=0)
     return enquiry_dt
 
 
