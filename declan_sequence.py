@@ -117,6 +117,17 @@ DHD_BAI_SEQUENCE = [
     (6, "dhd_bai_day11",  10, 13),
 ]
 
+# 26/09 Dec's utility strat: same shape as CT/BAI, day 3 at midday.
+DHD_UTI_SEQUENCE = [
+    (0, "__SKIP__",       0,  0),   # dhd_uti_instant handled by poller
+    (1, "dhd_eod_all",    0,  20),
+    (2, "dhd_uti_day2",   1,  13),
+    (3, "dhd_uti_day3",   2,  12),
+    (4, "dhd_uti_day5",   4,  13),
+    (5, "dhd_uti_day7",   6,  20),
+    (6, "dhd_uti_day11",  10, 13),
+]
+
 # day3 takes no param; the rest take {{name}}.
 # Verified against WATI 25/08: CT set + eod use first_name; BAI set is mixed.
 # Verified against WATI 25/08/2026 - the DHD templates mix conventions, so the
@@ -133,6 +144,12 @@ PARAM_OVERRIDE = {
     "dhd_bai_day5":  None,
     "dhd_bai_day7":  "name",
     "dhd_bai_day11": "first_name",
+    # utility set verified against WATI 26/09: day3 takes no param.
+    "dhd_uti_day2":  "first_name",
+    "dhd_uti_day3":  None,
+    "dhd_uti_day5":  "first_name",
+    "dhd_uti_day7":  "first_name",
+    "dhd_uti_day11": "first_name",
 }
 
 DHD_CT_NAME_PARAMS  = set()
@@ -143,6 +160,7 @@ CAMPAIGNS = [
     {"name": "UKDT", "tab": "UKDT AUTOMATION", "sequence": CT_SEQUENCE,  "name_params": CT_NAME_PARAMS},
     {"name": "DHD_CT",  "tab": "DHD CT AUTOMATION",  "sequence": DHD_CT_SEQUENCE,  "name_params": DHD_CT_NAME_PARAMS},
     {"name": "DHD_BAI", "tab": "DHD BAI AUTOMATION", "sequence": DHD_BAI_SEQUENCE, "name_params": DHD_BAI_NAME_PARAMS},
+    {"name": "DHD_UTI", "tab": "DHD UTI AUTOMATION", "sequence": DHD_UTI_SEQUENCE, "name_params": set()},
 ]
 
 STOP_STATUS = "contacted"
