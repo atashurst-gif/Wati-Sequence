@@ -524,10 +524,48 @@ def get_tracking_data(service) -> dict:
     return tracking
 
 
+_NOT_A_REPLY = re.compile(r"filled in your form|full name:|phone number:|can i get more info on this|read your article", re.I)
+_EMAIL_RE = re.compile(r"\S+@\S+\.\S+")
+
+
+def _prior_reply_at(phone, days=7):
+    """30/09: the reply webhook can only stamp leads already in the tracker, so a
+    lead who replied to their W0 before enrolment got chased anyway (Hayley/Vicky).
+    Look at the thread once: a real inbound after our first message, within `days`,
+    ignoring Meta's form echo / click-to-WhatsApp greeting. Fail-open (None)."""
+    try:
+        r = requests.get(f"{WATI_API_URL}/api/v1/getMessages/{format_phone(phone)}?pageSize=40",
+                         headers={"Authorization": f"Bearer {WATI_TOKEN}", "accept": "application/json"}, timeout=20)
+        items = ((r.json().get("messages") or {}).get("items")) or []
+    except Exception as e:
+        log.warning(f"prior-reply check failed for {phone}: {e}")
+        return None
+    def uk(v):
+        try:
+            return datetime.datetime.fromisoformat(str(v)[:19]).replace(tzinfo=datetime.timezone.utc).astimezone(UK_TZ)
+        except Exception:
+            return None
+    msgs = sorted([(uk(m.get("created")), m) for m in items if uk(m.get("created"))], key=lambda x: x[0])
+    outs = [d for d, m in msgs if m.get("owner") is not False and m.get("statusString")]
+    if not outs:
+        return None
+    first_out, cutoff = min(outs), datetime.datetime.now(UK_TZ) - datetime.timedelta(days=days)
+    for d, m in reversed(msgs):
+        t = m.get("text") or ""
+        if m.get("owner") is False and d > first_out and d >= cutoff \
+           and not _NOT_A_REPLY.search(t) and not (_EMAIL_RE.search(t) and re.search(r"\d{9,}", t)):
+            return d
+    return None
+
+
 def add_to_tracking(service, lead: dict):
     tab = get_tracking_tab(lead["tl_ref"])
+    status, replied_at = "active", ""
+    prior = _prior_reply_at(lead["phone"])
+    if prior:
+        status, replied_at = "replied", prior.strftime("%d/%m/%Y %H:%M")
     row = [lead["tl_ref"], lead["phone"], lead["campaign"], lead["first_name"],
-           lead["date"], "0", "", "active", ""]
+           lead["date"], "0", "", status, replied_at]
     service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{tab}'!A1",
@@ -535,7 +573,12 @@ def add_to_tracking(service, lead: dict):
         insertDataOption="INSERT_ROWS",
         body={"values": [row]}
     ).execute()
-    log.info(f"Added {lead['tl_ref']} to {tab}.")
+    log.info(f"Added {lead['tl_ref']} to {tab}." + (f" (already replied {replied_at})" if prior else ""))
+    if prior:
+        try:
+            update_sheet1_status(service, lead["phone"], "Replied")
+        except Exception:
+            pass
 
 
 def update_w0_tracking_status(service, phone: str, status: str):
