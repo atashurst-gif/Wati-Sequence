@@ -724,6 +724,13 @@ def send_wati_template(phone: str, template_name: str, first_name: str) -> bool:
 # Sequence Logic
 # ─────────────────────────────────────────────
 
+def _w0_first_step_delay(sequence):
+    """First-message (W0) leads: when step 1 is the 20:00 end-of-day message it follows
+    the normal same-evening rule, exactly like a TrustLink lead. The old 24-hour hold
+    only applies if step 1 is a timed follow-up."""
+    return None if "at_hour" in sequence[0] else 24
+
+
 def get_sequence(campaign: str) -> list:
     if "BST" in campaign.upper():
         return BST_SEQUENCE
@@ -754,7 +761,9 @@ def process_sequences(service):
     global _read_failed
     _read_failed = False
     ping()
-    now      = datetime.datetime.now()
+    # UK clock time. Lead dates and the 20:00 end-of-day step are UK times, so the
+    # server clock (UTC) made the EOD "not due" at 20:00 in summer and it slipped a day.
+    now      = datetime.datetime.now(UK_TZ).replace(tzinfo=None)
     leads    = get_all_leads(service)
     tracking = get_tracking_data(service)
     _sync_today_from_tracking(tracking)
@@ -795,7 +804,7 @@ def process_sequences(service):
 
         override_h = None
         if source_is_w0 and current_step == 0:
-            override_h = BOOKING_PENDING_DELAY_HOURS if is_booking_pending(status) else 24
+            override_h = BOOKING_PENDING_DELAY_HOURS if is_booking_pending(status) else _w0_first_step_delay(sequence)
         if is_booking_pending(status) and current_step == 0 and not source_is_w0:
             override_h = BOOKING_PENDING_DELAY_HOURS
         due_at = step_due_at(sequence[current_step], lead_date, override_h)
@@ -889,7 +898,7 @@ def process_sequences(service):
         next_msg = sequence[current_step]
         override_h = None
         if source_is_w0 and current_step == 0:
-            override_h = BOOKING_PENDING_DELAY_HOURS if booking_pending else 24
+            override_h = BOOKING_PENDING_DELAY_HOURS if booking_pending else _w0_first_step_delay(sequence)
         if booking_pending and current_step == 0 and not source_is_w0:
             override_h = BOOKING_PENDING_DELAY_HOURS
         due_at = step_due_at(next_msg, lead_date, override_h)
