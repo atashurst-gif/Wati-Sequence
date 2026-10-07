@@ -100,6 +100,12 @@ CUTOFF_DATE = datetime.datetime(2026, 4, 15)
 # Only these campaigns get WhatsApp sequences
 ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o", "flt", "ukdt ct2"}
 
+# First-message (W0) leads the poller logs as plain "UKDT" join the sequence from this
+# date. Earlier ones are left alone so months of old leads are not chased in one go.
+W0_UKDT_START = datetime.datetime.strptime(os.getenv("W0_UKDT_START", "06/10/2026"), "%d/%m/%Y")
+# Records for the same phone within this many days are one enquiry: one sequence.
+SAME_PERSON_DAYS = int(os.getenv("SAME_PERSON_DAYS", "14"))
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "12"))  # per-cycle drip feed, not a burst
 MAX_SENDS_PER_HOUR = int(os.getenv("MAX_SENDS_PER_HOUR", "14"))  # measured total send pace
@@ -742,6 +748,18 @@ def is_allowed_campaign(campaign: str) -> bool:
     return campaign.strip().upper() in {c.upper() for c in ALLOWED_CAMPAIGNS}
 
 
+def lead_allowed(lead: dict) -> bool:
+    """Allowed campaigns, plus first-message leads logged as plain UKDT (UKDT CT and
+    UKDT JOSH VIDS enquiries) from W0_UKDT_START onwards."""
+    campaign = lead["campaign"].strip()
+    if is_allowed_campaign(campaign):
+        return True
+    if lead.get("sheet_tab") == W0_TRACKING_SHEET and campaign.upper() == "UKDT":
+        d = parse_lead_date(lead["date"])
+        return bool(d and d >= W0_UKDT_START)
+    return False
+
+
 def parse_lead_date(date_str: str):
     for fmt in (
         "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
@@ -765,7 +783,16 @@ def process_sequences(service):
     # server clock (UTC) made the EOD "not due" at 20:00 in summer and it slipped a day.
     now      = datetime.datetime.now(UK_TZ).replace(tzinfo=None)
     leads    = get_all_leads(service)
+    _leads_read_failed = _read_failed
+    _read_failed = False
     tracking = get_tracking_data(service)
+    if _read_failed:
+        # Half a tracker makes tracked people look new: they would be enrolled again
+        # and sent step 1 again. Do nothing this cycle; the next one is 5 minutes away.
+        log.warning("Tracker read failed - skipping this cycle so nobody is enrolled or sent twice")
+        ping()
+        return
+    _read_failed = _leads_read_failed
     _sync_today_from_tracking(tracking)
     log.info(f"{len(leads)} leads in sheet | {len(tracking)} in tracking")
 
@@ -783,6 +810,37 @@ def process_sequences(service):
     }
     stopped_phones.discard("")
 
+    # One sequence per person. Someone on both the first-message log and the TrustLink
+    # feed has two records; only one tracker row may carry their sequence, and a stop
+    # status on any of their recent records stops it.
+    same_person = datetime.timedelta(days=SAME_PERSON_DAYS)
+    recent_stops = {}
+    for _l in leads:
+        if is_stopped_status(_l["status"]):
+            _d = parse_lead_date(_l["date"])
+            _p = _norm_phone(_l["phone"])
+            if _d and len(_p) == 10:
+                recent_stops.setdefault(_p, []).append(_d)
+
+    def _stopped_recently(ph, lead_date):
+        return any(abs(_d - lead_date) <= same_person for _d in recent_stops.get(ph, []))
+
+    def _index_tracking(trk):
+        idx = {}
+        for _ref, _t in trk.items():
+            _p = _norm_phone(_t["phone"])
+            _d = parse_lead_date(_t.get("lead_date", ""))
+            if _d and len(_p) == 10:
+                idx.setdefault(_p, []).append((_d, -_t["current_step"], _t.get("tracking_tab", ""), _t["row"], _ref))
+        return idx
+    tracked_by_phone = _index_tracking(tracking)
+
+    def _sequence_owner(ph, lead_date):
+        """The tracker ref carrying this person's sequence (furthest along, then the
+        earliest enrolled), or None if they are not tracked yet."""
+        rows = [r for r in tracked_by_phone.get(ph, []) if abs(r[0] - lead_date) <= same_person]
+        return min(rows, key=lambda r: r[1:4])[4] if rows else None
+
     today_uk = datetime.datetime.now(UK_TZ).date()
 
     def _lead_priority(lead):
@@ -791,7 +849,7 @@ def process_sequences(service):
         status = lead["status"].lower().strip()
         lead_date = parse_lead_date(lead["date"])
         if (not lead["phone"] or not tl_ref or not lead_date or
-                lead_date < CUTOFF_DATE or not is_allowed_campaign(campaign) or
+                lead_date < CUTOFF_DATE or not lead_allowed(lead) or
                 is_stopped_status(status) or _norm_phone(lead["phone"]) in stopped_phones):
             return (9, datetime.datetime.max, datetime.datetime.max, tl_ref)
 
@@ -833,6 +891,7 @@ def process_sequences(service):
     new_leads_added = 0
     messages_sent   = 0
     stopped_skips   = 0
+    person_skips    = 0
     daily_cap_logged = False
     backlog_cap_logged = False
     hourly_cap_logged = False
@@ -847,8 +906,8 @@ def process_sequences(service):
         if not lead["phone"] or not tl_ref:
             continue
 
-        # Only process allowed campaigns
-        if not is_allowed_campaign(campaign):
+        # Only process allowed campaigns (and UKDT first-message leads from the start date)
+        if not lead_allowed(lead):
             continue
 
         # Skip if status indicates stop
@@ -871,11 +930,30 @@ def process_sequences(service):
 
         source_is_w0 = lead.get("sheet_tab") == W0_TRACKING_SHEET
 
+        # One sequence per person
+        _ph = _norm_phone(lead["phone"])
+        if len(_ph) == 10:
+            if _stopped_recently(_ph, lead_date):
+                stopped_skips += 1
+                continue
+            _owner = _sequence_owner(_ph, lead_date)
+            if _owner is not None and _owner != tl_ref:
+                person_skips += 1
+                continue
+
         # Add to tracking if not already there
         if tl_ref not in tracking:
             add_to_tracking(service, lead)
-            tracking = get_tracking_data(service)
             new_leads_added += 1
+            time.sleep(2)   # many leads can enrol at once; stay under Google's 60 reads a minute
+            _earlier_failed = _read_failed
+            _read_failed = False
+            tracking = get_tracking_data(service)
+            if _read_failed:
+                log.warning("Tracker re-read failed after enrolling - stopping this cycle, the next one carries on")
+                break
+            _read_failed = _earlier_failed
+            tracked_by_phone = _index_tracking(tracking)
 
         track = tracking.get(tl_ref)
         if not track:
@@ -986,7 +1064,7 @@ def process_sequences(service):
             hrs = (due_at - now).total_seconds() / 3600
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
 
-    log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent, {stopped_skips} phone-stopped skips ───")
+    log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent, {stopped_skips} phone-stopped skips, {person_skips} same-person skips ───")
     if _read_failed:
         log.warning("Sheet read issue this cycle; keeping Healthchecks as liveness to avoid false DOWN/UP alerts")
     ping()
