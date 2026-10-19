@@ -1074,6 +1074,26 @@ def process_sequences(service):
 # ─────────────────────────────────────────────
 
 sheets_service_global = None
+# 19 Oct: the service froze at 18:11 on 18 Oct when a WhatsApp reply (webhook thread) and the sequence pass used the one
+# Google client at the same moment - that client is not thread-safe. One lock for every sheet use, a socket timeout so a
+# stalled call can't hang forever, and a watchdog that exits (Railway restarts it) if no pass completes for 30 minutes.
+SHEETS_LOCK = threading.Lock()
+_last_pass = [time.time()]
+import socket as _socket
+_socket.setdefaulttimeout(int(os.getenv("SHEETS_TIMEOUT", "60")))
+
+
+def _watchdog():
+    limit = int(os.getenv("WATCHDOG_SECS", "1800"))
+    while True:
+        time.sleep(60)
+        if time.time() - _last_pass[0] > limit:
+            log.error("watchdog: no sequence pass for %ss - exiting so Railway restarts the service" % limit)
+            try:
+                send_alert_email("WATI sequence service froze - restarting", "No sequence pass for %s seconds; the service exited to be restarted." % limit)
+            except Exception:
+                pass
+            os._exit(1)
 
 
 class WatiWebhookHandler(BaseHTTPRequestHandler):
@@ -1091,7 +1111,8 @@ class WatiWebhookHandler(BaseHTTPRequestHandler):
                 (payload.get("contact") or {}).get("wa_id", "")
             )
             if phone and sheets_service_global:
-                mark_replied_by_phone(sheets_service_global, str(phone))
+                with SHEETS_LOCK:
+                    mark_replied_by_phone(sheets_service_global, str(phone))
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
@@ -1143,13 +1164,16 @@ def main():
             ensure_tracking_sheet(sheets_service_global)
             start_webhook_server()
             start_healthcheck_heartbeat()
+            threading.Thread(target=_watchdog, daemon=True).start()
 
             log.info("Service started successfully.")
             consecutive_errors = 0
 
             while True:
                 try:
-                    process_sequences(sheets_service_global)
+                    with SHEETS_LOCK:
+                        process_sequences(sheets_service_global)
+                    _last_pass[0] = time.time()
                     consecutive_errors = 0
                 except Exception as e:
                     consecutive_errors += 1
