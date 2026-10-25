@@ -250,6 +250,11 @@ STOPPED_STATUSES = {
     "cbna", "callback set", "call back", "cancelled money wellness",
     "cancelled not interested (provide reason in notes)",
     "transferred to non ip",
+    # 25/10: the CRM dialler's outcomes. Once an agent has spoken to someone, they hung up, or the
+    # case was closed for any reason, the chase stops - the team owns that conversation.
+    # ("no contact" is not matched: it is the dialler's no-answer outcome, so the chase continues.)
+    "contacted", "client hung up", "cancelled", "not interested",
+    "incorrect number", "already in an iva", "low debt level",
 }
 BOOKING_PENDING_STATUS = "booking pending"
 BOOKING_SEQUENCE_ACTIVE_STATUS = "sequence active"
@@ -666,8 +671,13 @@ def is_booking_pending(status: str) -> bool:
     return BOOKING_PENDING_STATUS in (status or "").lower()
 
 
+NOT_STOP_PHRASES = ("not contacted", "uncontacted")   # contain "contacted" but mean the opposite
+
+
 def is_stopped_status(status: str) -> bool:
     status = (status or "").lower()
+    for phrase in NOT_STOP_PHRASES:
+        status = status.replace(phrase, "")
     return any(s in status for s in STOPPED_STATUSES)
 
 
