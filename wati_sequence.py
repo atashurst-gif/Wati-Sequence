@@ -259,6 +259,10 @@ STOPPED_STATUSES = {
 BOOKING_PENDING_STATUS = "booking pending"
 BOOKING_SEQUENCE_ACTIVE_STATUS = "sequence active"
 BOOKING_PENDING_DELAY_HOURS = int(os.getenv("BOOKING_PENDING_DELAY_HOURS", "4"))
+# 25/10: enquiries from this hour get the NEXT evening's end-of-day message. By 18:00 nobody is on
+# shift, so the CRM has already sent them its booking link; a 20:00 EOD on top of W0 + link inside
+# two hours was three messages in one evening.
+EOD_ROLL_HOUR = int(os.getenv("EOD_ROLL_HOUR", "18"))
 
 # ─────────────────────────────────────────────
 # Sending Window Logic
@@ -268,8 +272,8 @@ def step_due_at(step_cfg, lead_date, fallback_hours=None):
     """When is this step due?
 
     at_hour steps fire at a fixed clock time on the enquiry day, EXCEPT:
-      - enquiry already past that hour -> next day
-      - lands on a Saturday            -> Sunday
+      - enquiry from EOD_ROLL_HOUR (18:00) -> next day
+      - lands on a Saturday               -> Sunday
     The EOD copy says "tomorrow" and the office is open Mon-Sat, so a Saturday
     send would promise a Sunday call. Saturday and Sunday enquiries therefore
     both fire Sunday 20:00, pointing at Monday.
@@ -281,7 +285,7 @@ def step_due_at(step_cfg, lead_date, fallback_hours=None):
 
     due = lead_date.replace(hour=step_cfg["at_hour"], minute=0,
                             second=0, microsecond=0)
-    if lead_date >= due:                 # enquiry came in after the send hour
+    if lead_date.hour >= EOD_ROLL_HOUR or lead_date >= due:   # evening enquiry: tomorrow's EOD
         due = due + datetime.timedelta(days=1)
     if due.weekday() == 5:               # Saturday -> hold to Sunday
         due = due + datetime.timedelta(days=1)
