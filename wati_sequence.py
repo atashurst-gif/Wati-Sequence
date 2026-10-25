@@ -1053,6 +1053,21 @@ def process_sequences(service):
                     daily_cap_logged = True
                 continue
 
+            # 25/10: look at the WhatsApp thread before every send, not only at enrolment. If they have
+            # written to us in the last week the team owns that chat - stop and mark them replied,
+            # even when the reply webhook missed it. Fail-open: if WATI can't be asked, send as before.
+            _replied_at = None if booking_pending else _prior_reply_at(lead["phone"])
+            if _replied_at:
+                _stamp = _replied_at.strftime("%d/%m/%Y %H:%M")
+                update_tracking_row(service, track["row"], current_step, track.get("last_sent", ""),
+                                    "replied", _stamp, tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
+                if source_is_w0:
+                    update_w0_tracking_status(service, lead["phone"], "replied")
+                else:
+                    update_lead_status(service, lead, "Replied")
+                log.info(f"{tl_ref}: replied {_stamp} - sequence stopped before {next_msg['template']}")
+                continue
+
             if send_wati_template(lead["phone"], next_msg["template"], lead["first_name"]):
                 new_step   = current_step + 1
                 new_status = "completed" if new_step >= len(sequence) else "active"
