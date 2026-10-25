@@ -1148,10 +1148,7 @@ def process_sequences(service):
                 _stamp = _replied_at.strftime("%d/%m/%Y %H:%M")
                 update_tracking_row(service, track["row"], current_step, track.get("last_sent", ""),
                                     "replied", _stamp, tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
-                if source_is_w0:
-                    update_w0_tracking_status(service, lead["phone"], "replied")
-                else:
-                    update_lead_status(service, lead, "Replied")
+                update_lead_status(service, lead, "replied" if source_is_w0 else "Replied")
                 log.info(f"{tl_ref}: replied {_stamp} - sequence stopped before {next_msg['template']}")
                 continue
 
@@ -1167,7 +1164,10 @@ def process_sequences(service):
                 update_tracking_row(service, track["row"], new_step, last_sent, new_status,
                                     tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
                 if source_is_w0:
-                    update_w0_tracking_status(service, lead["phone"], "replied" if finished else "w0 sent")
+                    # the lead IS its W0 Tracking row - write it directly rather than re-reading the
+                    # whole tab for every send (66 reads in a minute at 20:00 on 25/10 blew the
+                    # 60/min read quota, and replies arriving by webhook in that minute were lost)
+                    update_lead_status(service, lead, "replied" if finished else "w0 sent")
                 if booking_pending and current_step == 0 and not source_is_w0:
                     update_lead_status(service, lead, BOOKING_SEQUENCE_ACTIVE_STATUS)
                 messages_sent += 1
