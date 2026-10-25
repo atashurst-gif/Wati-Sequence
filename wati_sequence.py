@@ -291,7 +291,7 @@ MIN_GAP_HOURS = float(os.getenv("MIN_GAP_HOURS", "20"))
 AT_HOUR_MAX_LATE_HOURS = float(os.getenv("AT_HOUR_MAX_LATE_HOURS", "30"))
 DAY_STEP_MAX_LATE_HOURS = float(os.getenv("DAY_STEP_MAX_LATE_HOURS", "72"))
 # Skipping writes the tracker; keep one cycle's skips under Google's per-minute write quota.
-MAX_SKIPS_PER_CYCLE = int(os.getenv("MAX_SKIPS_PER_CYCLE", "40"))
+MAX_SKIPS_PER_CYCLE = int(os.getenv("MAX_SKIPS_PER_CYCLE", "25"))
 
 # ─────────────────────────────────────────────
 # Sending Window Logic
@@ -1062,10 +1062,12 @@ def process_sequences(service):
         next_msg     = next_step_cfg(sequence, current_step)
 
         if next_msg is None:
-            if track["status"] != "completed":
+            if track["status"] != "completed" and skips < MAX_SKIPS_PER_CYCLE:
                 update_tracking_row(service, track["row"], current_step,
                                     track["last_sent"], "completed",
                                     tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
+                skips += 1          # housekeeping writes share the per-cycle write budget
+                time.sleep(1)
             continue
 
         override_h = None
