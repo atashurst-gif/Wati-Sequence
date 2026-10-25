@@ -4,7 +4,7 @@ WATI WhatsApp Sequence Automation
 - Sends templated WhatsApp messages via WATI API
 - Tracks progress in 'WATI Tracking' tab
 - Timetable from the enquiry: end-of-day 20:00 (day 0), fu1 19:00 (day 1), fu2 (day 3), fu4 (day 7)
-- Sending windows: Mon-Thu 9am-6pm, Fri 9am-2pm, no Sat/Sun
+- Daytime steps go out while someone is on shift in the CRM (fallback: Mon-Thu 9-6, Fri 9-2)
 - Only processes UKDT CT, BST, UKDT O campaigns
 - Skips leads added before 15/04/2026 (cutoff date)
 - Emails alert if service crashes
@@ -387,10 +387,10 @@ def get_next_send_time(now: datetime.datetime) -> datetime.datetime:
     return uk_now  # fallback
 
 
-def is_within_sending_window() -> bool:
-    """Returns True if current UK time is within a valid sending window."""
-    import zoneinfo
-    uk_now = datetime.datetime.now(zoneinfo.ZoneInfo("Europe/London"))
+def fixed_sending_window() -> bool:
+    """The old fixed window - Mon-Thu 9am-6pm, Fri 9am-2pm, no Sat/Sun - used only when the
+    CRM can't say whether anyone is on shift."""
+    uk_now = datetime.datetime.now(UK_TZ)
     wd = uk_now.weekday()
     h  = uk_now.hour
 
@@ -400,6 +400,48 @@ def is_within_sending_window() -> bool:
         return 9 <= h < 14
     else:         # Sat/Sun: never
         return False
+
+
+# 25/10: the CRM knows who is on shift (the Hub rota on weekdays, weekend sign-ins on Saturday and
+# Sunday). It is the same test the CRM uses to decide nobody is in and send its out-of-hours
+# booking link, so daytime follow-ups and booking links never go out in the same window.
+CRM_PRESENCE_URL = os.getenv("CRM_PRESENCE_URL", "https://regen-crm.onrender.com/api/public/presence")
+PRESENCE_CACHE_SECONDS = int(os.getenv("PRESENCE_CACHE_SECONDS", "60"))
+SEND_EARLIEST_HOUR = int(os.getenv("SEND_EARLIEST_HOUR", "8"))    # daytime steps never before 08:00 ...
+SEND_LATEST_HOUR   = int(os.getenv("SEND_LATEST_HOUR", "20"))     # ... or from 20:00, whatever the rota says
+_presence = {"at": 0.0, "someone_in": None}
+
+
+def crm_someone_in():
+    """Is anyone on shift in the CRM right now? True / False, or None if the CRM can't say."""
+    if not CRM_PRESENCE_URL:
+        return None
+    if time.time() - _presence["at"] < PRESENCE_CACHE_SECONDS:
+        return _presence["someone_in"]
+    val = None
+    try:
+        r = requests.get(CRM_PRESENCE_URL, timeout=15)
+        j = r.json() if r.status_code == 200 else {}
+        if j.get("ok") and "someoneIn" in j:
+            val = bool(j["someoneIn"])
+        else:
+            log.warning(f"CRM presence check: http {r.status_code} - using the fixed window")
+    except Exception as e:
+        log.warning(f"CRM presence check failed ({e}) - using the fixed window")
+    _presence.update(at=time.time(), someone_in=val)
+    return val
+
+
+def is_within_sending_window() -> bool:
+    """Daytime follow-ups go out while someone is on shift in the CRM (within 08:00-20:00 UK);
+    if the CRM can't be reached, the old fixed window applies."""
+    h = datetime.datetime.now(UK_TZ).hour
+    if not (SEND_EARLIEST_HOUR <= h < SEND_LATEST_HOUR):
+        return False
+    live = crm_someone_in()
+    if live is not None:
+        return live
+    return fixed_sending_window()
 
 # ─────────────────────────────────────────────
 # Alert Email
@@ -1221,7 +1263,7 @@ def main():
     log.info("Starting WATI Sequence Automation...")
     log.info(f"Cutoff date: {CUTOFF_DATE.strftime('%d/%m/%Y')} (leads before this are skipped)")
     log.info(f"Allowed campaigns: {ALLOWED_CAMPAIGNS}")
-    log.info(f"Sending windows: Mon-Thu 9am-6pm, Fri 9am-2pm, no Sat/Sun")
+    log.info(f"Daytime steps send while someone is on shift in the CRM ({CRM_PRESENCE_URL or 'off'}); fallback window Mon-Thu 9am-6pm, Fri 9am-2pm")
     log.info(f"Alert email: {ALERT_EMAIL}")
 
     consecutive_errors = 0
