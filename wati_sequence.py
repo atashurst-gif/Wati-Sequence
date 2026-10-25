@@ -3,8 +3,8 @@ WATI WhatsApp Sequence Automation
 - Reads leads from Google Sheet (Sheet1)
 - Sends templated WhatsApp messages via WATI API
 - Tracks progress in 'WATI Tracking' tab
+- Timetable from the enquiry: end-of-day 20:00 (day 0), fu1 19:00 (day 1), fu2 (day 3), fu4 (day 7)
 - Sending windows: Mon-Thu 9am-6pm, Fri 9am-2pm, no Sat/Sun
-- Sends at random times within windows
 - Only processes UKDT CT, BST, UKDT O campaigns
 - Skips leads added before 15/04/2026 (cutoff date)
 - Emails alert if service crashes
@@ -220,28 +220,45 @@ def start_healthcheck_heartbeat():
 # Sequence Definitions
 # ─────────────────────────────────────────────
 
+# Rebuilt 25/10/2026. Every step is timed from the ENQUIRY, not from the previous send:
+#   "day" = days after day 0, the evening the end-of-day message goes out (the enquiry day;
+#           the next day for enquiries from 18:00; never a Saturday - see sequence_day_zero)
+#   "at_hour" steps are evening messages that go out in that clock hour only;
+#   the others go out from 09:00 on their day, the next time someone is on shift in the CRM
+#   (is_within_sending_window), so they never land in the CRM's out-of-hours booking-link window.
+# Step numbers are the message's identity in the tracker's Current Step column and are kept
+# from the old six-step shape, so leads already part-way through carry on correctly:
+#   fu3 (old step 4, day 5) and fu5 (old step 6, day 8) are retired - 4.5% and 1.8% replies;
+#   a lead showing 4 (fu3 sent) gets fu4 next, 5 or 6 (fu4/fu5 sent) is finished.
 UKDT_SEQUENCE = [
-    # Rebuilt 26/08/2026. Step 1 = 20:00 EOD on the enquiry day (rolled if the
-    # enquiry was after 20:00, or if it would land on a Saturday). Old nc1-nc6 retired.
-    {"step": 1, "template": "eod_all",  "at_hour": 20},
-    {"step": 2, "template": "ukdt_fu1", "delay_hours": 24},
-    {"step": 3, "template": "ukdt_fu2", "delay_hours": 72},
-    {"step": 4, "template": "ukdt_fu3", "delay_hours": 120},
-    {"step": 5, "template": "ukdt_fu4", "delay_hours": 168},
-    {"step": 6, "template": "ukdt_fu5", "delay_hours": 192},
+    {"step": 1, "template": "eod_all",  "day": 0, "at_hour": 20},
+    {"step": 2, "template": "ukdt_fu1", "day": 1, "at_hour": 19},
+    {"step": 3, "template": "ukdt_fu2", "day": 3},
+    {"step": 5, "template": "ukdt_fu4", "day": 7},
     # Steps 7-10 retired Aug 2026: ~4% reply rate across ~1,800 sends and the
-    # main driver of the WhatsApp quality drop to Medium. Sequence ends at 6.
+    # main driver of the WhatsApp quality drop to Medium.
 ]
 
 BST_SEQUENCE = [
-    {"step": 1, "template": "eod_all", "at_hour": 20},
-    {"step": 2, "template": "bst_fu1",  "delay_hours": 24},
-    {"step": 3, "template": "bst_fu2",  "delay_hours": 72},
-    {"step": 4, "template": "bst_fu3",  "delay_hours": 120},
-    {"step": 5, "template": "bst_fu4",  "delay_hours": 168},
-    {"step": 6, "template": "bst_fu5",  "delay_hours": 192},
-    # Steps 7-10 retired Aug 2026 - see UKDT_SEQUENCE note above.
+    {"step": 1, "template": "eod_all", "day": 0, "at_hour": 20},
+    {"step": 2, "template": "bst_fu1", "day": 1, "at_hour": 19},
+    {"step": 3, "template": "bst_fu2", "day": 3},
+    {"step": 5, "template": "bst_fu4", "day": 7},
 ]
+
+
+def next_step_cfg(sequence, current_step):
+    """The next message for a lead whose Current Step (last step number sent) is current_step,
+    or None when the sequence is finished for them."""
+    for cfg in sequence:
+        if cfg["step"] > current_step:
+            return cfg
+    return None
+
+
+def step_position(sequence, cfg):
+    """'2/4' style position of a step, for logs."""
+    return f"{sequence.index(cfg) + 1}/{len(sequence)}"
 
 STOPPED_STATUSES = {
     "replied", "completed", "opted out", "converted",
@@ -263,33 +280,52 @@ BOOKING_PENDING_DELAY_HOURS = int(os.getenv("BOOKING_PENDING_DELAY_HOURS", "4"))
 # shift, so the CRM has already sent them its booking link; a 20:00 EOD on top of W0 + link inside
 # two hours was three messages in one evening.
 EOD_ROLL_HOUR = int(os.getenv("EOD_ROLL_HOUR", "18"))
+# Daytime steps are due from this hour on their day.
+DAY_STEP_HOUR = int(os.getenv("DAY_STEP_HOUR", "9"))
+# Never two messages to the same person closer than this (EOD 20:00 -> fu1 19:00 next day is 23h).
+MIN_GAP_HOURS = float(os.getenv("MIN_GAP_HOURS", "20"))
+# A step this long overdue is skipped, not sent: an evening message a day late reads wrong, and a
+# daytime one more than three days late (a weekend is two) is stale. The lead simply gets whatever
+# is next on the timetable. This is also what stops a catch-up wave when the service was down or
+# the timetable changes - nobody gets a pile of old follow-ups in one go.
+AT_HOUR_MAX_LATE_HOURS = float(os.getenv("AT_HOUR_MAX_LATE_HOURS", "30"))
+DAY_STEP_MAX_LATE_HOURS = float(os.getenv("DAY_STEP_MAX_LATE_HOURS", "72"))
+# Skipping writes the tracker; keep one cycle's skips under Google's per-minute write quota.
+MAX_SKIPS_PER_CYCLE = int(os.getenv("MAX_SKIPS_PER_CYCLE", "40"))
 
 # ─────────────────────────────────────────────
 # Sending Window Logic
 # ─────────────────────────────────────────────
 
-def step_due_at(step_cfg, lead_date, fallback_hours=None):
-    """When is this step due?
-
-    at_hour steps fire at a fixed clock time on the enquiry day, EXCEPT:
-      - enquiry from EOD_ROLL_HOUR (18:00) -> next day
-      - lands on a Saturday               -> Sunday
-    The EOD copy says "tomorrow" and the office is open Mon-Sat, so a Saturday
-    send would promise a Sunday call. Saturday and Sunday enquiries therefore
-    both fire Sunday 20:00, pointing at Monday.
+def sequence_day_zero(lead_date):
+    """Day 0 of a lead's timetable: the evening its end-of-day message goes out.
+      - the enquiry day, at midnight
+      - the next day for enquiries from EOD_ROLL_HOUR (18:00): by then nobody is on
+        shift and the CRM has already sent them its booking link
+      - never a Saturday: the EOD copy says "tomorrow" and the office is open Mon-Sat,
+        so a Saturday send would promise a Sunday call. Saturday and Sunday enquiries
+        therefore both get Sunday's 20:00 message, pointing at Monday.
+    Every later step counts its "day" from here, so an evening enquiry's whole
+    timetable moves on a day with its EOD and the steps stay in order.
     """
+    day = lead_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    if lead_date.hour >= EOD_ROLL_HOUR:
+        day = day + datetime.timedelta(days=1)
+    if day.weekday() == 5:
+        day = day + datetime.timedelta(days=1)
+    return day
+
+
+def step_due_at(step_cfg, lead_date, fallback_hours=None):
+    """When is this step due? "day" steps are timed from the enquiry (sequence_day_zero),
+    at their at_hour for evening messages or DAY_STEP_HOUR (09:00) for daytime ones.
+    Old-style delay_hours steps (none in the live sequences now) count from the enquiry."""
     if fallback_hours is not None:
         return lead_date + datetime.timedelta(hours=fallback_hours)
-    if "at_hour" not in step_cfg:
+    if "day" not in step_cfg and "delay_hours" in step_cfg:
         return lead_date + datetime.timedelta(hours=step_cfg["delay_hours"])
-
-    due = lead_date.replace(hour=step_cfg["at_hour"], minute=0,
-                            second=0, microsecond=0)
-    if lead_date.hour >= EOD_ROLL_HOUR or lead_date >= due:   # evening enquiry: tomorrow's EOD
-        due = due + datetime.timedelta(days=1)
-    if due.weekday() == 5:               # Saturday -> hold to Sunday
-        due = due + datetime.timedelta(days=1)
-    return due
+    day = sequence_day_zero(lead_date) + datetime.timedelta(days=step_cfg.get("day", 0))
+    return day.replace(hour=step_cfg.get("at_hour", DAY_STEP_HOUR))
 
 
 def get_next_send_time(now: datetime.datetime) -> datetime.datetime:
@@ -871,7 +907,8 @@ def process_sequences(service):
         track = tracking.get(tl_ref)
         current_step = track["current_step"] if track else 0
         sequence = get_sequence(campaign)
-        if current_step >= len(sequence):
+        next_cfg = next_step_cfg(sequence, current_step)
+        if next_cfg is None:
             return (8, datetime.datetime.max, lead_date, tl_ref)
 
         override_h = None
@@ -879,7 +916,7 @@ def process_sequences(service):
             override_h = BOOKING_PENDING_DELAY_HOURS if is_booking_pending(status) else _w0_first_step_delay(sequence)
         if is_booking_pending(status) and current_step == 0 and not source_is_w0:
             override_h = BOOKING_PENDING_DELAY_HOURS
-        due_at = step_due_at(sequence[current_step], lead_date, override_h)
+        due_at = step_due_at(next_cfg, lead_date, override_h)
 
         is_today_lead = lead_date.date() == today_uk
         if is_today_lead:
@@ -906,6 +943,7 @@ def process_sequences(service):
     messages_sent   = 0
     stopped_skips   = 0
     person_skips    = 0
+    skips           = 0     # steps too late to send, moved past without sending
     daily_cap_logged = False
     backlog_cap_logged = False
     hourly_cap_logged = False
@@ -979,15 +1017,15 @@ def process_sequences(service):
 
         sequence     = get_sequence(campaign)
         current_step = track["current_step"]
+        next_msg     = next_step_cfg(sequence, current_step)
 
-        if current_step >= len(sequence):
+        if next_msg is None:
             if track["status"] != "completed":
                 update_tracking_row(service, track["row"], current_step,
                                     track["last_sent"], "completed",
                                     tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
             continue
 
-        next_msg = sequence[current_step]
         override_h = None
         if source_is_w0 and current_step == 0:
             override_h = BOOKING_PENDING_DELAY_HOURS if booking_pending else _w0_first_step_delay(sequence)
@@ -995,46 +1033,47 @@ def process_sequences(service):
             override_h = BOOKING_PENDING_DELAY_HOURS
         due_at = step_due_at(next_msg, lead_date, override_h)
 
-        # Spacing gate: don't fire step N until the real gap since the PREVIOUS
-        # step's actual send has elapsed. Stops backlog leads bursting through
-        # multiple steps in minutes. Normally-paced leads are unaffected.
-        # at_hour steps have no delay_hours - treat as 0 so the gap gate is a no-op.
-        prev_delay = (sequence[current_step - 1].get("delay_hours", 0)
-                      if current_step > 0 else 0)
-        required_gap_h = next_msg.get("delay_hours", 0) - prev_delay
+        # Minimum gap between two messages to the same person, measured from the last real
+        # send. (The old gate waited the step's whole designed gap after the PREVIOUS send,
+        # which compounded: fu1 landed 2 days in, fu2 nearly 5, fu4 at 10.)
         last_sent_str = track.get("last_sent", "")
-        if current_step > 0 and last_sent_str:
+        if last_sent_str:
             try:
                 last_dt = datetime.datetime.strptime(last_sent_str, "%d/%m/%Y %H:%M")
-                if (now - last_dt).total_seconds() / 3600 < required_gap_h:
-                    continue  # not enough real time since last send — wait
+                if (now - last_dt).total_seconds() / 3600 < MIN_GAP_HOURS:
+                    continue  # too soon after the last message - wait
             except ValueError:
                 pass  # unparseable date — don't block
 
         if now >= due_at:
-            # All steps (incl W1) respect business hours — no out-of-hours sends.
-            # New leads still get instant W0 from the poller (separate service).
-            # the 20:00 EOD is deliberately outside the 09:00-18:00 window.
-            if "at_hour" in next_msg:
-                # EOD only ever goes out in its own hour (20:xx). Never 2am, never
-                # 10pm. If it's been missed by more than a day the "today" copy is
-                # wrong, so advance to the next step without sending it.
+            is_at_hour = "at_hour" in next_msg
+            # Too late to send this one? Skip it without sending and move the lead on to the
+            # next step on their timetable. Evening copy a day late reads wrong; a daytime step
+            # more than three days late is stale. Nobody ever gets a pile of catch-up messages.
+            _late_h = (now - due_at).total_seconds() / 3600
+            if _late_h > (AT_HOUR_MAX_LATE_HOURS if is_at_hour else DAY_STEP_MAX_LATE_HOURS):
+                if skips >= MAX_SKIPS_PER_CYCLE:
+                    continue        # the rest next cycle - tracker writes are rate-limited
+                update_tracking_row(service, track["row"], next_msg["step"],
+                                    track.get("last_sent", ""), "active",
+                                    tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
+                skips += 1
+                time.sleep(1)
+                log.info(f"{tl_ref}: {next_msg['template']} was due {due_at:%d/%m %H:%M}, "
+                         f"{_late_h / 24:.1f} days ago - skipped without sending")
+                continue
+            if is_at_hour:
+                # Evening messages only ever go out in their own hour (20:xx for the EOD,
+                # 19:xx for fu1). Never 2am, never 10pm.
                 if datetime.datetime.now(UK_TZ).hour != next_msg["at_hour"]:
-                    _late = (now.replace(tzinfo=None) - due_at.replace(tzinfo=None)).total_seconds()
-                    if _late > 30 * 3600:
-                        update_tracking_row(service, track["row"], current_step + 1,
-                                            track.get("last_sent", ""), "active",
-                                            tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
-                        log.info(f"{tl_ref}: eod missed by >1 day, skipped without sending")
                     continue
             elif not is_within_sending_window():
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
                 continue
-            # at_hour steps (the 20:00 EOD) bypass the cycle and hourly caps so
+            # at_hour steps (the evening messages) bypass the cycle and hourly caps so
             # a same-day message never queues behind fu catch-up and lands the
             # next day. They still count toward, and are bounded by, the daily
             # and backlog caps below.
-            is_at_hour = "at_hour" in next_msg
             if not is_at_hour and messages_sent >= MAX_SENDS_PER_CYCLE:
                 if not cycle_cap_logged:
                     log.info(f"Cycle cap reached ({MAX_SENDS_PER_CYCLE}) - sends paused, enrolment continues")
@@ -1073,8 +1112,9 @@ def process_sequences(service):
                 continue
 
             if send_wati_template(lead["phone"], next_msg["template"], lead["first_name"]):
-                new_step   = current_step + 1
-                new_status = "completed" if new_step >= len(sequence) else "active"
+                new_step   = next_msg["step"]
+                finished   = next_step_cfg(sequence, new_step) is None
+                new_status = "completed" if finished else "active"
                 last_sent  = now.strftime("%d/%m/%Y %H:%M")
                 # Advance the sequence step + write last_sent for EVERY lead,
                 # including W0-sourced ones. Previously W0-sourced leads only had
@@ -1083,17 +1123,17 @@ def process_sequences(service):
                 update_tracking_row(service, track["row"], new_step, last_sent, new_status,
                                     tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
                 if source_is_w0:
-                    update_w0_tracking_status(service, lead["phone"], "replied" if new_step >= len(sequence) else "w0 sent")
+                    update_w0_tracking_status(service, lead["phone"], "replied" if finished else "w0 sent")
                 if booking_pending and current_step == 0 and not source_is_w0:
                     update_lead_status(service, lead, BOOKING_SEQUENCE_ACTIVE_STATUS)
                 messages_sent += 1
                 _bump_today(is_backlog_send)
-                log.info(f"{tl_ref}: step {new_step}/{len(sequence)} — {next_msg['template']} (hour total: {_hour_sent()}/{MAX_SENDS_PER_HOUR}, backlog total: {_backlog_sent()}/{MAX_BACKLOG_SENDS_PER_DAY}, day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
+                log.info(f"{tl_ref}: {next_msg['template']} ({step_position(sequence, next_msg)}, step {new_step}) (hour total: {_hour_sent()}/{MAX_SENDS_PER_HOUR}, backlog total: {_backlog_sent()}/{MAX_BACKLOG_SENDS_PER_DAY}, day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
         else:
             hrs = (due_at - now).total_seconds() / 3600
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
 
-    log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent, {stopped_skips} phone-stopped skips, {person_skips} same-person skips ───")
+    log.info(f"─── Done — {new_leads_added} new leads added, {messages_sent} messages sent, {skips} late steps skipped, {stopped_skips} phone-stopped skips, {person_skips} same-person skips ───")
     if _read_failed:
         log.warning("Sheet read issue this cycle; keeping Healthchecks as liveness to avoid false DOWN/UP alerts")
     ping()
