@@ -406,6 +406,31 @@ def fixed_sending_window() -> bool:
 # Sunday). It is the same test the CRM uses to decide nobody is in and send its out-of-hours
 # booking link, so daytime follow-ups and booking links never go out in the same window.
 CRM_PRESENCE_URL = os.getenv("CRM_PRESENCE_URL", "https://regen-crm.onrender.com/api/public/presence")
+# 26/10 (Aaron): stop the follow-ups once a client has booked a callback or been spoken to, whether or not
+# they ever wrote back on WhatsApp (booking from the link isn't a reply). Covers Regen's and TPA's enquiries.
+# The CRM gives hashed phones; fail-open (if the CRM can't be reached, the reply checks still apply).
+CRM_STOPS_URL = os.getenv("CRM_STOPS_URL", "https://regen-crm.onrender.com/api/public/chase-stops")
+_crm_stops = {"at": 0.0, "booked": set(), "spoken": set()}
+
+def crm_stop_reason(phone):
+    import hashlib
+    if time.time() - _crm_stops["at"] > 120:
+        try:
+            r = requests.get(CRM_STOPS_URL, timeout=30)
+            j = r.json() if r.status_code == 200 else {}
+            if j.get("ok"):
+                _crm_stops.update(at=time.time(), booked=set(j.get("booked") or []), spoken=set(j.get("spoken") or []))
+        except Exception as e:
+            log.warning(f"CRM stop list unavailable: {e}")
+    d = re.sub(r"\D", "", str(phone or ""))[-10:]
+    if len(d) < 10:
+        return None
+    h = hashlib.sha256(d.encode()).hexdigest()[:20]
+    if h in _crm_stops["booked"]:
+        return "callback set"
+    if h in _crm_stops["spoken"]:
+        return "contacted"
+    return None
 PRESENCE_CACHE_SECONDS = int(os.getenv("PRESENCE_CACHE_SECONDS", "60"))
 SEND_EARLIEST_HOUR = int(os.getenv("SEND_EARLIEST_HOUR", "8"))    # daytime steps never before 08:00 ...
 SEND_LATEST_HOUR   = int(os.getenv("SEND_LATEST_HOUR", "20"))     # ... or from 20:00, whatever the rota says
@@ -1163,6 +1188,12 @@ def process_sequences(service):
             # 25/10: look at the WhatsApp thread before every send, not only at enrolment. If they have
             # written to us in the last week the team owns that chat - stop and mark them replied,
             # even when the reply webhook missed it. Fail-open: if WATI can't be asked, send as before.
+            _stop = None if booking_pending else crm_stop_reason(lead["phone"])
+            if _stop:
+                update_tracking_row(service, track["row"], current_step, track.get("last_sent", ""),
+                                    _stop, tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
+                log.info(f"{tl_ref}: {_stop} in the CRM - sequence stopped before {next_msg['template']}")
+                continue
             _replied_at = None if booking_pending else _prior_reply_at(lead["phone"])
             if _replied_at:
                 _stamp = _replied_at.strftime("%d/%m/%Y %H:%M")
