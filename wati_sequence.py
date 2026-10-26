@@ -251,14 +251,16 @@ BST_SEQUENCE = [
     {"step": 5, "template": "bst_fu4", "day": 7},
 ]
 
-# 26/10 (Aaron): the follow-up no longer stops at day 7. Long tail on days 14, 30, 60, 90, 150 and 360 (day 360 closes
-# the enquiry). Step numbers 11-16 sit above every number the old shapes ever wrote (up to 10), so a lead part-way
-# through anything carries straight on. Leads that finished at day 7 without replying ("completed") carry on into it too.
-# Each long-tail template only goes out once WATI shows it APPROVED; until then those steps wait (no send, no skip).
-# Long-tail sends have their own daily allowance and never use the core messages' daily/backlog caps.
-LONGTAIL_DAYS = [(11, 14), (12, 30), (13, 60), (14, 90), (15, 150), (16, 360)]
-UKDT_SEQUENCE += [{"step": st, "template": f"ukdt_lt{d}", "day": d, "longtail": True} for st, d in LONGTAIL_DAYS]
-BST_SEQUENCE += [{"step": st, "template": f"bst_lt{d}", "day": d, "longtail": True} for st, d in LONGTAIL_DAYS]
+# 26/10 19:40 (Aaron): quick fix while the new long-tail wording is written - the messages that used to follow day 7
+# come back, on their old days: fu5 (retired 25/10) and nc7-nc10 (retired 25/08). Step numbers are their old ones
+# (6 = fu5, 7-10 = nc7-nc10), so leads part-way through anything carry straight on. BST's fu5 says "I'm closing your
+# enquiry off today", so for BST it goes last (step 11, day 19) instead of before four more messages.
+# They are "longtail" steps: sent only once their template shows APPROVED in WATI (all are), on their own daily
+# allowance after the core messages, and leads that finished at day 7 without replying carry on into them.
+LONGTAIL_DAYS = [(6, 8, "fu5"), (7, 9, "nc7"), (8, 12, "nc8"), (9, 15, "nc9"), (10, 18, "nc10")]
+UKDT_SEQUENCE += [{"step": st, "template": f"ukdt_{t}", "day": d, "longtail": True} for st, d, t in LONGTAIL_DAYS]
+BST_SEQUENCE += [{"step": st, "template": f"bst_{t}", "day": d, "longtail": True} for st, d, t in LONGTAIL_DAYS if t != "fu5"]
+BST_SEQUENCE += [{"step": 11, "template": "bst_fu5", "day": 19, "longtail": True}]
 LONGTAIL_FIRST_STEP = LONGTAIL_DAYS[0][0]
 MAX_LONGTAIL_SENDS_PER_DAY = int(os.getenv("MAX_LONGTAIL_SENDS_PER_DAY", "60"))
 _longtail_sends = {}
