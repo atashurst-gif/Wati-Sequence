@@ -420,7 +420,7 @@ def crm_someone_in():
         return _presence["someone_in"]
     val = None
     try:
-        r = requests.get(CRM_PRESENCE_URL, timeout=15)
+        r = requests.get(CRM_PRESENCE_URL, timeout=30)
         j = r.json() if r.status_code == 200 else {}
         if j.get("ok") and "someoneIn" in j:
             val = bool(j["someoneIn"])
