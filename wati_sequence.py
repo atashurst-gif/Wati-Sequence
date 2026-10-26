@@ -169,6 +169,7 @@ def _sync_today_from_tracking(tracking: dict):
     sent_today = 0
     sent_this_hour = 0
     backlog_sent_today = 0
+    lt_today = 0
     for item in tracking.values():
         last_sent = item.get("last_sent") or ""
         if not last_sent:
@@ -178,15 +179,19 @@ def _sync_today_from_tracking(tracking: dict):
         except ValueError:
             continue
         if sent_dt.date() == today:
-            sent_today += 1
             if sent_dt.hour == current_hour:
                 sent_this_hour += 1
+            if int(item.get("current_step") or 0) >= LONGTAIL_FIRST_STEP:
+                lt_today += 1       # a long-tail send: its own allowance
+                continue
+            sent_today += 1
             lead_date = parse_lead_date(item.get("lead_date", ""))
             if _is_backlog_lead_date(lead_date):
                 backlog_sent_today += 1
     _daily_sends[today] = max(_daily_sends.get(today, 0), sent_today)
     _hourly_sends[(today, current_hour)] = max(_hourly_sends.get((today, current_hour), 0), sent_this_hour)
     _backlog_sends[today] = max(_backlog_sends.get(today, 0), backlog_sent_today)
+    _longtail_sends[today] = max(_longtail_sends.get(today, 0), lt_today)
 
 HC_PING_URL = os.getenv("HC_PING_URL", "https://hc-ping.com/a44b8422-f5b3-44d5-9b48-3e1d30acf187")
 HEALTHCHECK_HEARTBEAT_SECONDS = int(os.getenv("HEALTHCHECK_HEARTBEAT_SECONDS", "240"))
@@ -245,6 +250,43 @@ BST_SEQUENCE = [
     {"step": 3, "template": "bst_fu2", "day": 3},
     {"step": 5, "template": "bst_fu4", "day": 7},
 ]
+
+# 26/10 (Aaron): the follow-up no longer stops at day 7. Long tail on days 14, 30, 60, 90, 150 and 360 (day 360 closes
+# the enquiry). Step numbers 11-16 sit above every number the old shapes ever wrote (up to 10), so a lead part-way
+# through anything carries straight on. Leads that finished at day 7 without replying ("completed") carry on into it too.
+# Each long-tail template only goes out once WATI shows it APPROVED; until then those steps wait (no send, no skip).
+# Long-tail sends have their own daily allowance and never use the core messages' daily/backlog caps.
+LONGTAIL_DAYS = [(11, 14), (12, 30), (13, 60), (14, 90), (15, 150), (16, 360)]
+UKDT_SEQUENCE += [{"step": st, "template": f"ukdt_lt{d}", "day": d, "longtail": True} for st, d in LONGTAIL_DAYS]
+BST_SEQUENCE += [{"step": st, "template": f"bst_lt{d}", "day": d, "longtail": True} for st, d in LONGTAIL_DAYS]
+LONGTAIL_FIRST_STEP = LONGTAIL_DAYS[0][0]
+MAX_LONGTAIL_SENDS_PER_DAY = int(os.getenv("MAX_LONGTAIL_SENDS_PER_DAY", "60"))
+_longtail_sends = {}
+
+def _lt_sent():
+    today = datetime.datetime.now(UK_TZ).date()
+    for d in list(_longtail_sends):
+        if d != today:
+            del _longtail_sends[d]
+    return _longtail_sends.get(today, 0)
+
+_approved = {"at": 0.0, "names": set()}
+def approved_templates():
+    """Approved template names on Regen's WATI, re-read every 10 minutes. If WATI can't be read the last good list
+    stays; with no list at all, nothing that needs approval is sent."""
+    if time.time() - _approved["at"] < 600:
+        return _approved["names"]
+    _approved["at"] = time.time()
+    try:
+        r = requests.get(f"{WATI_API_URL}/api/v1/getMessageTemplates?pageSize=300&pageNumber=1",
+                         headers={"Authorization": f"Bearer {WATI_TOKEN}", "accept": "application/json"}, timeout=30)
+        names = {t.get("elementName") for t in (r.json().get("messageTemplates") or [])
+                 if "approved" in str(t.get("status", "")).lower()}
+        if names:
+            _approved["names"] = names
+    except Exception as e:
+        log.warning(f"approved-templates check failed: {e}")
+    return _approved["names"]
 
 
 def next_step_cfg(sequence, current_step):
@@ -410,7 +452,7 @@ CRM_PRESENCE_URL = os.getenv("CRM_PRESENCE_URL", "https://regen-crm.onrender.com
 # they ever wrote back on WhatsApp (booking from the link isn't a reply). Covers Regen's and TPA's enquiries.
 # The CRM gives hashed phones; fail-open (if the CRM can't be reached, the reply checks still apply).
 CRM_STOPS_URL = os.getenv("CRM_STOPS_URL", "https://regen-crm.onrender.com/api/public/chase-stops")
-_crm_stops = {"at": 0.0, "booked": set(), "spoken": set()}
+_crm_stops = {"at": 0.0, "booked": set(), "spoken": set(), "tpa": set(), "tpa_hours": None}
 
 def crm_stop_reason(phone):
     import hashlib
@@ -419,7 +461,8 @@ def crm_stop_reason(phone):
             r = requests.get(CRM_STOPS_URL, timeout=30)
             j = r.json() if r.status_code == 200 else {}
             if j.get("ok"):
-                _crm_stops.update(at=time.time(), booked=set(j.get("booked") or []), spoken=set(j.get("spoken") or []))
+                _crm_stops.update(at=time.time(), booked=set(j.get("booked") or []), spoken=set(j.get("spoken") or []),
+                                  tpa=set(j.get("tpa") or []), tpa_hours=j.get("tpaHours") or None)
         except Exception as e:
             log.warning(f"CRM stop list unavailable: {e}")
     d = re.sub(r"\D", "", str(phone or ""))[-10:]
@@ -431,6 +474,28 @@ def crm_stop_reason(phone):
     if h in _crm_stops["spoken"]:
         return "contacted"
     return None
+
+
+# 26/10 (Aaron): Declan's (TPA) clients follow HIS hours (Mon-Fri 9:00-18:30, Sat/Sun 9:00-15:00, from the CRM), not
+# Regen's shifts, for the daytime messages. The CRM's stop list says which numbers are his (his TrustLink + his rota share).
+TPA_DEFAULT_HOURS = {"weekday": ["09:00", "18:30"], "weekend": ["09:00", "15:00"]}
+
+def crm_is_tpa(phone):
+    import hashlib
+    crm_stop_reason(phone)          # refreshes the list when it's stale
+    d = re.sub(r"\D", "", str(phone or ""))[-10:]
+    return len(d) == 10 and hashlib.sha256(d.encode()).hexdigest()[:20] in _crm_stops["tpa"]
+
+def tpa_open_now():
+    h = _crm_stops.get("tpa_hours") or TPA_DEFAULT_HOURS
+    now = datetime.datetime.now(UK_TZ)
+    rng = h.get("weekend") if now.weekday() >= 5 else h.get("weekday")
+    try:
+        a, b = [int(x.split(":")[0]) * 60 + int(x.split(":")[1]) for x in rng]
+    except Exception:
+        a, b = 9 * 60, 18 * 60 + 30
+    m = now.hour * 60 + now.minute
+    return a <= m <= b
 PRESENCE_CACHE_SECONDS = int(os.getenv("PRESENCE_CACHE_SECONDS", "60"))
 SEND_EARLIEST_HOUR = int(os.getenv("SEND_EARLIEST_HOUR", "8"))    # daytime steps never before 08:00 ...
 SEND_LATEST_HOUR   = int(os.getenv("SEND_LATEST_HOUR", "20"))     # ... or from 20:00, whatever the rota says
@@ -919,10 +984,15 @@ def process_sequences(service):
     def _norm_phone(ph):
         d = re.sub(r"\D", "", str(ph))
         return d[-10:] if len(d) >= 10 else d
+    # 26/10: "completed" alone now means "finished the old day-7 sequence without replying" - it carries on into the
+    # long tail, so it no longer stops anyone. Every other stop ("replied", "completed - duplicate record"...) still does.
+    def _track_stop(t):
+        st = (t.get("status") or "").strip().lower()
+        return is_stopped_status(st) and st != "completed"
     stopped_phones = {
         _norm_phone(t["phone"])
         for t in tracking.values()
-        if is_stopped_status(t.get("status"))
+        if _track_stop(t)
         and len(_norm_phone(t["phone"])) == 10
     }
     stopped_phones.discard("")
@@ -933,7 +1003,7 @@ def process_sequences(service):
     # SAME_PERSON_DAYS are judged this way; anything older keeps the old rule, so no old lead wakes up.
     _stop_dates = {}
     for t in tracking.values():
-        if is_stopped_status(t.get("status")):
+        if _track_stop(t):
             _p = _norm_phone(t["phone"])
             if len(_p) == 10:
                 _stop_dates.setdefault(_p, []).append(parse_lead_date(t.get("lead_date", "") or ""))
@@ -950,10 +1020,26 @@ def process_sequences(service):
     # One sequence per person. Someone on both the first-message log and the TrustLink
     # feed has two records; only one tracker row may carry their sequence, and a stop
     # status on any of their recent records stops it.
+    def _finished_early(lead):
+        """Finished at day 7 without replying (tracker "completed") and the long tail still has steps for them."""
+        t = tracking.get(lead["tl_ref"].strip())
+        if not t or (t.get("status") or "").strip().lower() != "completed":
+            return False
+        return next_step_cfg(get_sequence(lead["campaign"].strip()), t["current_step"]) is not None
+
+    def _lead_stop(lead):
+        st = (lead["status"] or "").lower().strip()
+        if not is_stopped_status(st):
+            return False
+        # finishing wrote "replied" on the lead's W0 row; the tracker row says "completed" when it was no real reply
+        if lead.get("sheet_tab") == W0_TRACKING_SHEET and st == "replied" and _finished_early(lead):
+            return False
+        return True
+
     same_person = datetime.timedelta(days=SAME_PERSON_DAYS)
     recent_stops = {}
     for _l in leads:
-        if is_stopped_status(_l["status"]):
+        if _lead_stop(_l):
             _d = parse_lead_date(_l["date"])
             _p = _norm_phone(_l["phone"])
             if _d and len(_p) == 10:
@@ -987,7 +1073,7 @@ def process_sequences(service):
         lead_date = parse_lead_date(lead["date"])
         if (not lead["phone"] or not tl_ref or not lead_date or
                 lead_date < CUTOFF_DATE or not lead_allowed(lead) or
-                is_stopped_status(status) or _phone_stopped(lead)):
+                _lead_stop(lead) or _phone_stopped(lead)):
             return (9, datetime.datetime.max, datetime.datetime.max, tl_ref)
 
         source_is_w0 = lead.get("sheet_tab") == W0_TRACKING_SHEET
@@ -1006,6 +1092,8 @@ def process_sequences(service):
         due_at = step_due_at(next_cfg, lead_date, override_h)
 
         is_today_lead = lead_date.date() == today_uk
+        if next_cfg.get("longtail"):
+            return (6, due_at, -lead_date.timestamp(), tl_ref)   # long tail only uses what the core messages leave
         if is_today_lead:
             bucket = 0                  # today's live leads before catch-up work
             freshness = lead_date.timestamp()
@@ -1050,7 +1138,7 @@ def process_sequences(service):
             continue
 
         # Skip if status indicates stop
-        if is_stopped_status(status):
+        if _lead_stop(lead):
             continue
 
         # Skip if this PERSON (by phone) is stopped under any other reference
@@ -1098,8 +1186,8 @@ def process_sequences(service):
         if not track:
             continue
 
-        # Skip if tracking says replied/completed/otherwise stopped
-        if is_stopped_status(track["status"]):
+        # Skip if tracking says replied/otherwise stopped ("completed" with long-tail steps left carries on)
+        if is_stopped_status(track["status"]) and not _finished_early(lead):
             continue
 
         sequence     = get_sequence(campaign)
@@ -1136,6 +1224,7 @@ def process_sequences(service):
 
         if now >= due_at:
             is_at_hour = "at_hour" in next_msg
+            is_lt = bool(next_msg.get("longtail"))
             # Too late to send this one? Skip it without sending and move the lead on to the
             # next step on their timetable. Evening copy a day late reads wrong; a daytime step
             # more than three days late is stale. Nobody ever gets a pile of catch-up messages.
@@ -1143,22 +1232,40 @@ def process_sequences(service):
             if _late_h > (AT_HOUR_MAX_LATE_HOURS if is_at_hour else DAY_STEP_MAX_LATE_HOURS):
                 if skips >= MAX_SKIPS_PER_CYCLE:
                     continue        # the rest next cycle - tracker writes are rate-limited
-                update_tracking_row(service, track["row"], next_msg["step"],
-                                    track.get("last_sent", ""), "active",
+                # 26/10: jump past every step that is already too late in ONE write (a lead from May joining the
+                # long tail would otherwise take five cycles of writes to reach the step that is actually due)
+                target, skipped = next_msg, [next_msg["template"]]
+                for cfg in sequence[sequence.index(next_msg) + 1:]:
+                    _lim = AT_HOUR_MAX_LATE_HOURS if "at_hour" in cfg else DAY_STEP_MAX_LATE_HOURS
+                    if (now - step_due_at(cfg, lead_date, None)).total_seconds() / 3600 > _lim:
+                        target = cfg
+                        skipped.append(cfg["template"])
+                    else:
+                        break
+                # a lead carrying on from "completed" keeps that status until a long-tail message actually goes
+                # (its W0 row says "replied" from finishing; "completed" is what tells the two apart)
+                _keep = "completed" if (track.get("status") or "").strip().lower() == "completed" else "active"
+                update_tracking_row(service, track["row"], target["step"],
+                                    track.get("last_sent", ""), _keep,
                                     tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
                 skips += 1
                 time.sleep(1)
-                log.info(f"{tl_ref}: {next_msg['template']} was due {due_at:%d/%m %H:%M}, "
-                         f"{_late_h / 24:.1f} days ago - skipped without sending")
+                log.info(f"{tl_ref}: {', '.join(skipped)} too late (first was due {due_at:%d/%m %H:%M}, "
+                         f"{_late_h / 24:.1f} days ago) - skipped without sending")
                 continue
             if is_at_hour:
                 # Evening messages only ever go out in their own hour (20:xx for the EOD,
                 # 19:xx for fu1). Never 2am, never 10pm.
                 if datetime.datetime.now(UK_TZ).hour != next_msg["at_hour"]:
                     continue
-            elif not is_within_sending_window():
+            elif not (tpa_open_now() if crm_is_tpa(lead["phone"]) else is_within_sending_window()):
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
                 continue
+            if is_lt:
+                if next_msg["template"] not in approved_templates():
+                    continue        # not approved in WATI yet: wait (no send, no skip)
+                if _lt_sent() >= MAX_LONGTAIL_SENDS_PER_DAY:
+                    continue
             # at_hour steps (the evening messages) bypass the cycle and hourly caps so
             # a same-day message never queues behind fu catch-up and lands the
             # next day. They still count toward, and are bounded by, the daily
@@ -1174,12 +1281,14 @@ def process_sequences(service):
                     hourly_cap_logged = True
                 continue
             is_backlog_send = _is_backlog_lead_date(lead_date)
-            if is_backlog_send and _backlog_sent() >= MAX_BACKLOG_SENDS_PER_DAY:
+            if is_lt:
+                pass                # long tail: its own daily allowance (checked above), not the core caps
+            elif is_backlog_send and _backlog_sent() >= MAX_BACKLOG_SENDS_PER_DAY:
                 if not backlog_cap_logged:
                     log.info(f"Backlog cap reached ({MAX_BACKLOG_SENDS_PER_DAY}) - today/new leads still allowed")
                     backlog_cap_logged = True
                 continue
-            if _today_sent() >= MAX_SENDS_PER_DAY:
+            elif _today_sent() >= MAX_SENDS_PER_DAY:
                 if not daily_cap_logged:
                     log.info(f"Daily cap reached ({MAX_SENDS_PER_DAY}) - sends paused, enrolment continues")
                     daily_cap_logged = True
@@ -1194,7 +1303,8 @@ def process_sequences(service):
                                     _stop, tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
                 log.info(f"{tl_ref}: {_stop} in the CRM - sequence stopped before {next_msg['template']}")
                 continue
-            _replied_at = None if booking_pending else _prior_reply_at(lead["phone"])
+            # long tail: ANY real reply since we first wrote, however long ago, ends it (not just the last week)
+            _replied_at = None if booking_pending else _prior_reply_at(lead["phone"], days=400 if is_lt else 7)
             if _replied_at:
                 _stamp = _replied_at.strftime("%d/%m/%Y %H:%M")
                 update_tracking_row(service, track["row"], current_step, track.get("last_sent", ""),
@@ -1222,7 +1332,13 @@ def process_sequences(service):
                 if booking_pending and current_step == 0 and not source_is_w0:
                     update_lead_status(service, lead, BOOKING_SEQUENCE_ACTIVE_STATUS)
                 messages_sent += 1
-                _bump_today(is_backlog_send)
+                if is_lt:
+                    today_k = datetime.datetime.now(UK_TZ).date()
+                    _longtail_sends[today_k] = _longtail_sends.get(today_k, 0) + 1
+                    hk = (today_k, datetime.datetime.now(UK_TZ).hour)
+                    _hourly_sends[hk] = _hourly_sends.get(hk, 0) + 1     # still part of the hourly pace
+                else:
+                    _bump_today(is_backlog_send)
                 log.info(f"{tl_ref}: {next_msg['template']} ({step_position(sequence, next_msg)}, step {new_step}) (hour total: {_hour_sent()}/{MAX_SENDS_PER_HOUR}, backlog total: {_backlog_sent()}/{MAX_BACKLOG_SENDS_PER_DAY}, day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
         else:
             hrs = (due_at - now).total_seconds() / 3600
