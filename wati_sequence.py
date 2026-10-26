@@ -256,10 +256,28 @@ BST_SEQUENCE = [
 # shape wrote (up to 16), so a lead part-way through anything carries on. "longtail" steps: their own daily allowance
 # after the core messages, sent only while WATI shows the template APPROVED, and day-7 finishers carry on into them.
 LONGTAIL_DAYS = [(21, 14), (22, 28), (23, 60), (24, 90), (25, 180)]
-_LT_UKDT = ["ukdt_fu3", "ukdt_nc6", "ukdt_nc7", "ukdt_nc4", "ukdt_cbna4"]
-_LT_BST  = ["bst_fu3", "bst_nc_6", "bst_nc4", "bst_cbna4", "bst_fu2"]   # day 180: "here's what actually happens" (catch_up read oddly to someone we never spoke to)
-UKDT_SEQUENCE += [{"step": st, "template": t, "day": d, "longtail": True} for (st, d), t in zip(LONGTAIL_DAYS, _LT_UKDT)]
-BST_SEQUENCE += [{"step": st, "template": t, "day": d, "longtail": True} for (st, d), t in zip(LONGTAIL_DAYS, _LT_BST)]
+# 26/10 20:05: every message says something different. New templates (submitted to WATI tonight) take over each step the
+# moment WATI shows them APPROVED ("prefer"); until then the existing approved template goes out ("template").
+#   UKDT: 14 check-in (council been back?), 28 bury-our-heads, 60 a plan, 90 what happens on the call, 180 rated Excellent
+#   BST:  14 check-in (bailiffs been back?), 28 bury-our-heads, 60 your rights, 90 fees set by law, 180 you're not alone
+_LT_UKDT = [("ukdt_fu3", None), ("ukdt_nc6", None), ("ukdt_nc7", None), ("ukdt_nc4", "ukdt_lt90"), ("ukdt_cbna4", "ukdt_lt180")]
+_LT_BST  = [("bst_fu3", None), ("bst_nc_6", None), ("bst_nc4", "bst_lt60"), ("bst_cbna4", "bst_lt90"), ("bst_fu2", "bst_lt180")]
+UKDT_SEQUENCE += [dict({"step": st, "template": t, "day": d, "longtail": True}, **({"prefer": [p]} if p else {})) for (st, d), (t, p) in zip(LONGTAIL_DAYS, _LT_UKDT)]
+BST_SEQUENCE += [dict({"step": st, "template": t, "day": d, "longtail": True}, **({"prefer": [p]} if p else {})) for (st, d), (t, p) in zip(LONGTAIL_DAYS, _LT_BST)]
+# day 7: no more "your enquiry's set to close tomorrow" now the follow-ups carry on - the check-in template once approved
+for _q, _p in ((UKDT_SEQUENCE, "ukdt_day7_checkin"), (BST_SEQUENCE, "bst_day7_checkin")):
+    for _c in _q:
+        if _c["step"] == 5:
+            _c["prefer"] = [_p]
+
+def step_template(cfg):
+    """The template to send for a step: the first of its "prefer" list that WATI shows APPROVED, else its own."""
+    if cfg.get("prefer"):
+        ok = approved_templates()
+        for t in cfg["prefer"]:
+            if t in ok:
+                return t
+    return cfg["template"]
 LONGTAIL_FIRST_STEP = LONGTAIL_DAYS[0][0]
 MAX_LONGTAIL_SENDS_PER_DAY = int(os.getenv("MAX_LONGTAIL_SENDS_PER_DAY", "60"))
 _longtail_sends = {}
@@ -1314,7 +1332,8 @@ def process_sequences(service):
                 log.info(f"{tl_ref}: replied {_stamp} - sequence stopped before {next_msg['template']}")
                 continue
 
-            if send_wati_template(lead["phone"], next_msg["template"], lead["first_name"]):
+            _tpl = step_template(next_msg)
+            if send_wati_template(lead["phone"], _tpl, lead["first_name"]):
                 new_step   = next_msg["step"]
                 finished   = next_step_cfg(sequence, new_step) is None
                 new_status = "completed" if finished else "active"
@@ -1340,7 +1359,7 @@ def process_sequences(service):
                     _hourly_sends[hk] = _hourly_sends.get(hk, 0) + 1     # still part of the hourly pace
                 else:
                     _bump_today(is_backlog_send)
-                log.info(f"{tl_ref}: {next_msg['template']} ({step_position(sequence, next_msg)}, step {new_step}) (hour total: {_hour_sent()}/{MAX_SENDS_PER_HOUR}, backlog total: {_backlog_sent()}/{MAX_BACKLOG_SENDS_PER_DAY}, day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
+                log.info(f"{tl_ref}: {_tpl} ({step_position(sequence, next_msg)}, step {new_step}) (hour total: {_hour_sent()}/{MAX_SENDS_PER_HOUR}, backlog total: {_backlog_sent()}/{MAX_BACKLOG_SENDS_PER_DAY}, day total: {_today_sent()}/{MAX_SENDS_PER_DAY})")
         else:
             hrs = (due_at - now).total_seconds() / 3600
             log.debug(f"{tl_ref}: next msg in {hrs:.1f}h ({next_msg['template']})")
