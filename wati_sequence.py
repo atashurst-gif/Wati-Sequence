@@ -257,7 +257,7 @@ BST_SEQUENCE = [
 # after the core messages, sent only while WATI shows the template APPROVED, and day-7 finishers carry on into them.
 LONGTAIL_DAYS = [(21, 14), (22, 28), (23, 60), (24, 90), (25, 180)]
 _LT_UKDT = ["ukdt_fu3", "ukdt_nc6", "ukdt_nc7", "ukdt_nc4", "ukdt_cbna4"]
-_LT_BST  = ["bst_fu3", "bst_nc_6", "bst_nc4", "bst_cbna4", "catch_up"]
+_LT_BST  = ["bst_fu3", "bst_nc_6", "bst_nc4", "bst_cbna4", "bst_fu2"]   # day 180: "here's what actually happens" (catch_up read oddly to someone we never spoke to)
 UKDT_SEQUENCE += [{"step": st, "template": t, "day": d, "longtail": True} for (st, d), t in zip(LONGTAIL_DAYS, _LT_UKDT)]
 BST_SEQUENCE += [{"step": st, "template": t, "day": d, "longtail": True} for (st, d), t in zip(LONGTAIL_DAYS, _LT_BST)]
 LONGTAIL_FIRST_STEP = LONGTAIL_DAYS[0][0]
