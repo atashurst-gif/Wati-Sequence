@@ -901,6 +901,26 @@ def process_sequences(service):
         and len(_norm_phone(t["phone"])) == 10
     }
     stopped_phones.discard("")
+    # 26/10: a person who enquires AGAIN is a new enquiry. Their old record (replied in May, sequence
+    # completed in June...) used to stop the new one for good, so a re-enquiry got the first message and
+    # nothing else (TPA: Annie 18/10, Stewart 25/10). A stop now only counts against an enquiry when the
+    # stopped record is from within SAME_PERSON_DAYS before it (or later). Only enquiries from the last
+    # SAME_PERSON_DAYS are judged this way; anything older keeps the old rule, so no old lead wakes up.
+    _stop_dates = {}
+    for t in tracking.values():
+        if is_stopped_status(t.get("status")):
+            _p = _norm_phone(t["phone"])
+            if len(_p) == 10:
+                _stop_dates.setdefault(_p, []).append(parse_lead_date(t.get("lead_date", "") or ""))
+
+    def _phone_stopped(lead):
+        ph = _norm_phone(lead["phone"])
+        if ph not in stopped_phones:
+            return False
+        d = parse_lead_date(lead["date"])
+        if not d or now - d > datetime.timedelta(days=SAME_PERSON_DAYS):
+            return True
+        return any(sd is None or sd >= d - datetime.timedelta(days=SAME_PERSON_DAYS) for sd in _stop_dates.get(ph, []))
 
     # One sequence per person. Someone on both the first-message log and the TrustLink
     # feed has two records; only one tracker row may carry their sequence, and a stop
@@ -942,7 +962,7 @@ def process_sequences(service):
         lead_date = parse_lead_date(lead["date"])
         if (not lead["phone"] or not tl_ref or not lead_date or
                 lead_date < CUTOFF_DATE or not lead_allowed(lead) or
-                is_stopped_status(status) or _norm_phone(lead["phone"]) in stopped_phones):
+                is_stopped_status(status) or _phone_stopped(lead)):
             return (9, datetime.datetime.max, datetime.datetime.max, tl_ref)
 
         source_is_w0 = lead.get("sheet_tab") == W0_TRACKING_SHEET
@@ -1009,7 +1029,7 @@ def process_sequences(service):
             continue
 
         # Skip if this PERSON (by phone) is stopped under any other reference
-        if _norm_phone(lead["phone"]) in stopped_phones:
+        if _phone_stopped(lead):
             stopped_skips += 1
             continue
 
