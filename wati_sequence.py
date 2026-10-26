@@ -251,16 +251,15 @@ BST_SEQUENCE = [
     {"step": 5, "template": "bst_fu4", "day": 7},
 ]
 
-# 26/10 19:40 (Aaron): quick fix while the new long-tail wording is written - the messages that used to follow day 7
-# come back, on their old days: fu5 (retired 25/10) and nc7-nc10 (retired 25/08). Step numbers are their old ones
-# (6 = fu5, 7-10 = nc7-nc10), so leads part-way through anything carry straight on. BST's fu5 says "I'm closing your
-# enquiry off today", so for BST it goes last (step 11, day 19) instead of before four more messages.
-# They are "longtail" steps: sent only once their template shows APPROVED in WATI (all are), on their own daily
-# allowance after the core messages, and leads that finished at day 7 without replying carry on into them.
-LONGTAIL_DAYS = [(6, 8, "fu5"), (7, 9, "nc7"), (8, 12, "nc8"), (9, 15, "nc9"), (10, 18, "nc10")]
-UKDT_SEQUENCE += [{"step": st, "template": f"ukdt_{t}", "day": d, "longtail": True} for st, d, t in LONGTAIL_DAYS]
-BST_SEQUENCE += [{"step": st, "template": f"bst_{t}", "day": d, "longtail": True} for st, d, t in LONGTAIL_DAYS if t != "fu5"]
-BST_SEQUENCE += [{"step": 11, "template": "bst_fu5", "day": 19, "longtail": True}]
+# 26/10 19:50 (Aaron): after day 7, spread out - day 14, 28, 60, 90 and 180 (last) - using approved templates with
+# nothing in them: no "closing", no "limited time", no claims we can't back. Steps 21-25 sit above every number any old
+# shape wrote (up to 16), so a lead part-way through anything carries on. "longtail" steps: their own daily allowance
+# after the core messages, sent only while WATI shows the template APPROVED, and day-7 finishers carry on into them.
+LONGTAIL_DAYS = [(21, 14), (22, 28), (23, 60), (24, 90), (25, 180)]
+_LT_UKDT = ["ukdt_fu3", "ukdt_nc6", "ukdt_nc7", "ukdt_nc4", "ukdt_cbna4"]
+_LT_BST  = ["bst_fu3", "bst_nc_6", "bst_nc4", "bst_cbna4", "catch_up"]
+UKDT_SEQUENCE += [{"step": st, "template": t, "day": d, "longtail": True} for (st, d), t in zip(LONGTAIL_DAYS, _LT_UKDT)]
+BST_SEQUENCE += [{"step": st, "template": t, "day": d, "longtail": True} for (st, d), t in zip(LONGTAIL_DAYS, _LT_BST)]
 LONGTAIL_FIRST_STEP = LONGTAIL_DAYS[0][0]
 MAX_LONGTAIL_SENDS_PER_DAY = int(os.getenv("MAX_LONGTAIL_SENDS_PER_DAY", "60"))
 _longtail_sends = {}
