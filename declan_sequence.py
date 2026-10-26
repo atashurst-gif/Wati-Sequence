@@ -318,6 +318,7 @@ def process_campaign(svc, campaign, now):
     booked = load_booked_phones(svc)
     sent = 0
     stopped = 0
+    sent_today = set()   # (number, template): one person on two rows gets each message once
     for i, r in enumerate(rows[1:], start=2):  # row 1 = header
         date_raw = r[0] if len(r) > 0 else ""
         name     = r[1] if len(r) > 1 else ""
@@ -382,6 +383,17 @@ def process_campaign(svc, campaign, now):
                 valueInputOption="RAW", body={"values": [[str(new_step), stamp]]}
             ).execute()
             continue
+
+        _key = (_last9(number), template)
+        if _key in sent_today:
+            # same person on another row already had this message this cycle - advance without sending
+            if not DRY_RUN:
+                svc.spreadsheets().values().update(
+                    spreadsheetId=SHEET_ID, range=f"'{tab}'!E{i}:F{i}", valueInputOption="RAW",
+                    body={"values": [[str(current_step + 1), now.strftime("%d/%m/%Y %H:%M")]]}).execute()
+            log.info(f"[{cname}] row {i}: {template} already sent to this number on another row - not sent again")
+            continue
+        sent_today.add(_key)
 
         if send_declan_template(number, template, first_name, name_params):
             sent += 1
