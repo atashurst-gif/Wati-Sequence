@@ -98,7 +98,7 @@ TOKEN_FILE        = os.getenv("TOKEN_FILE", "token.json")
 CUTOFF_DATE = datetime.datetime(2026, 4, 15)
 
 # Only these campaigns get WhatsApp sequences
-ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o", "flt", "ukdt ct2"}
+ALLOWED_CAMPAIGNS = {"ukdt ct", "bst", "ukdt o", "flt", "ukdt ct2", "ukdt tpa", "bst tpa"}
 
 # First-message (W0) leads the poller logs as plain "UKDT" join the sequence from this
 # date. Earlier ones are left alone so months of old leads are not chased in one go.
@@ -385,6 +385,15 @@ def step_due_at(step_cfg, lead_date, fallback_hours=None):
         return lead_date + datetime.timedelta(hours=fallback_hours)
     if "day" not in step_cfg and "delay_hours" in step_cfg:
         return lead_date + datetime.timedelta(hours=step_cfg["delay_hours"])
+    if step_cfg.get("dz") == "declan":
+        # Declan's day (as his own tenant): after 20:00 counts as the next day; Fri/Sat/Sun start on Monday
+        d0 = lead_date
+        if d0.hour >= 20:
+            d0 = d0 + datetime.timedelta(days=1)
+        if d0.weekday() >= 4:
+            d0 = d0 + datetime.timedelta(days=7 - d0.weekday())
+        d0 = d0.replace(hour=0, minute=0, second=0, microsecond=0)
+        return (d0 + datetime.timedelta(days=step_cfg.get("day", 0))).replace(hour=step_cfg.get("at_hour", DAY_STEP_HOUR))
     day = sequence_day_zero(lead_date) + datetime.timedelta(days=step_cfg.get("day", 0))
     return day.replace(hour=step_cfg.get("at_hour", DAY_STEP_HOUR))
 
@@ -940,8 +949,58 @@ def _w0_first_step_delay(sequence):
     return None if "at_hour" in sequence[0] else 24
 
 
+# 27/10: Declan's (TPA) council tax and bailiff leads on Regen's WATI - Susan Dec video, his UKDT CT and BST rota share,
+# logged "UKDT TPA" / "BST TPA" by the poller - get his DHD sequence: same days, hours and wording as his own tenant's
+# DHD CT / DHD BAI. Fixed clock hours (his team's times, not Regen's rota). Step numbers line up with the Regen
+# sequence (1 EOD, 2 day 1, 3 day 2/3, 5 day 6/7), so a lead switching over mid-way carries on at the right point.
+# Used only once all ten templates are APPROVED on Regen's WATI; until then his leads stay on the Regen sequence.
+TPA_UKDT_SEQUENCE = [
+    {"step": 1, "template": "eod_all",        "day": 0,  "at_hour": 20, "dz": "declan", "max_late_h": 4},
+    {"step": 2, "template": "ukdt_tpa_day2",  "day": 1,  "at_hour": 13, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
+    {"step": 3, "template": "ukdt_tpa_day3",  "day": 2,  "at_hour": 11, "dz": "declan", "max_late_h": 4},
+    {"step": 4, "template": "ukdt_tpa_day5",  "day": 4,  "at_hour": 13, "dz": "declan", "max_late_h": 4},
+    {"step": 5, "template": "ukdt_tpa_day7",  "day": 6,  "at_hour": 20, "dz": "declan", "max_late_h": 4},
+    {"step": 6, "template": "ukdt_tpa_day11", "day": 10, "at_hour": 13, "dz": "declan", "max_late_h": 4},
+]
+TPA_BST_SEQUENCE = [
+    {"step": 1, "template": "eod_all",        "day": 0,  "at_hour": 20, "dz": "declan", "max_late_h": 4},
+    {"step": 2, "template": "bst_tpa_day2",   "day": 1,  "at_hour": 13, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
+    {"step": 3, "template": "bst_tpa_day3",   "day": 2,  "at_hour": 11, "dz": "declan", "max_late_h": 4},
+    {"step": 4, "template": "bst_tpa_day5",   "day": 4,  "at_hour": 13, "dz": "declan", "max_late_h": 4},
+    {"step": 5, "template": "bst_tpa_day7",   "day": 6,  "at_hour": 20, "dz": "declan", "max_late_h": 4},
+    {"step": 6, "template": "bst_tpa_day11",  "day": 10, "at_hour": 13, "dz": "declan", "max_late_h": 4},
+]
+_TPA_TEMPLATES = {c["template"] for c in TPA_UKDT_SEQUENCE + TPA_BST_SEQUENCE}
+_tpa_ready = {"at": 0.0, "ok": False, "missing": None}
+
+
+def tpa_templates_ready() -> bool:
+    """True once every TPA template is APPROVED on Regen's WATI (checked every 10 min)."""
+    if time.time() - _tpa_ready["at"] < 600:
+        return _tpa_ready["ok"]
+    ok = _tpa_ready["ok"]
+    try:
+        r = requests.get(f"{WATI_API_URL}/api/v1/getMessageTemplates?pageSize=1000",
+                         headers={"Authorization": f"Bearer {WATI_TOKEN}"}, timeout=30)
+        approved = {t.get("elementName") for t in (r.json().get("messageTemplates") or [])
+                    if str(t.get("status", "")).upper() == "APPROVED"}
+        missing = sorted(_TPA_TEMPLATES - approved)
+        ok = not missing
+        if missing != _tpa_ready["missing"]:
+            log.info("TPA sequence: " + ("all templates approved - Declan's leads on his DHD sequence" if ok
+                                         else f"waiting on {len(missing)} template(s) {missing} - his leads stay on the Regen sequence"))
+        _tpa_ready["missing"] = missing
+    except Exception as e:
+        log.warning(f"TPA template check failed ({e}) - keeping last answer ({ok})")
+    _tpa_ready.update(at=time.time(), ok=ok)
+    return ok
+
+
 def get_sequence(campaign: str) -> list:
-    if "BST" in campaign.upper():
+    c = campaign.upper()
+    if "TPA" in c and tpa_templates_ready():
+        return TPA_BST_SEQUENCE if "BST" in c else TPA_UKDT_SEQUENCE
+    if "BST" in c:
         return BST_SEQUENCE
     return UKDT_SEQUENCE
 
@@ -1238,7 +1297,7 @@ def process_sequences(service):
         if last_sent_str:
             try:
                 last_dt = datetime.datetime.strptime(last_sent_str, "%d/%m/%Y %H:%M")
-                if (now - last_dt).total_seconds() / 3600 < MIN_GAP_HOURS:
+                if (now - last_dt).total_seconds() / 3600 < next_msg.get("min_gap_h", MIN_GAP_HOURS):
                     continue  # too soon after the last message - wait
             except ValueError:
                 pass  # unparseable date — don't block
@@ -1250,7 +1309,7 @@ def process_sequences(service):
             # next step on their timetable. Evening copy a day late reads wrong; a daytime step
             # more than three days late is stale. Nobody ever gets a pile of catch-up messages.
             _late_h = (now - due_at).total_seconds() / 3600
-            if _late_h > (AT_HOUR_MAX_LATE_HOURS if is_at_hour else DAY_STEP_MAX_LATE_HOURS):
+            if _late_h > next_msg.get("max_late_h", AT_HOUR_MAX_LATE_HOURS if is_at_hour else DAY_STEP_MAX_LATE_HOURS):
                 if skips >= MAX_SKIPS_PER_CYCLE:
                     continue        # the rest next cycle - tracker writes are rate-limited
                 # 26/10: jump past every step that is already too late in ONE write (a lead from May joining the
