@@ -219,23 +219,43 @@ def parse_enquiry_date(s: str):
     return None
 
 
+_PARAM_LEARNED = {}   # template -> param name (or None) that WATI accepted, learned from a retry
+
+
 def send_declan_template(phone: str, template_name: str, first_name: str, name_params: set) -> bool:
+    """Send with the configured param; if WATI rejects it, try the other two conventions once each
+    (first_name / name / none) and remember the one that works, so a wrong setting never drops a send."""
+    if template_name in _PARAM_LEARNED:
+        return _send_declan(phone, template_name, first_name, _PARAM_LEARNED[template_name])
+    if template_name in PARAM_OVERRIDE:
+        first = PARAM_OVERRIDE[template_name]
+    elif template_name in name_params:
+        first = "name"
+    else:
+        first = None
+    for pname in [first] + [x for x in ("first_name", "name", None) if x != first]:
+        res = _send_declan(phone, template_name, first_name, pname)
+        if res is True:
+            if pname != first:
+                _PARAM_LEARNED[template_name] = pname
+                log.warning(f"{template_name}: WATI accepted param {pname!r} (config says {first!r}) - using that from now on")
+            return True
+        if res is None:          # network/server trouble, not a param problem - don't retry variants
+            return False
+    return False
+
+
+def _send_declan(phone: str, template_name: str, first_name: str, pname):
+    """True = sent, False = WATI rejected the template/params, None = couldn't reach WATI."""
     formatted = format_phone(phone)
     if DRY_RUN:
         log.info(f"[DRY RUN] would send {template_name} to {formatted} ({first_name})")
         return True
     url = f"{WATI_API_URL_DECLAN}/api/v2/sendTemplateMessages"
     headers = {"Authorization": f"Bearer {WATI_TOKEN_DECLAN}", "Content-Type": "application/json"}
-    if template_name in PARAM_OVERRIDE:
-        pname = PARAM_OVERRIDE[template_name]
-        receiver = {"whatsappNumber": formatted}
-        if pname:
-            receiver["customParams"] = [{"name": pname, "value": first_name}]
-    elif template_name in name_params:
-        receiver = {"whatsappNumber": formatted,
-                    "customParams": [{"name": "name", "value": first_name}]}
-    else:
-        receiver = {"whatsappNumber": formatted}
+    receiver = {"whatsappNumber": formatted}
+    if pname:
+        receiver["customParams"] = [{"name": pname, "value": first_name}]
     payload = {
         "template_name": template_name,
         "broadcast_name": f"decseq_{template_name}_{formatted[-4:]}",
@@ -254,10 +274,10 @@ def send_declan_template(phone: str, template_name: str, first_name: str, name_p
             log.error(f"Declan WATI accepted-but-REJECTED {template_name} for {formatted}: {str(body)[:250]}")
             return False
         log.error(f"Declan WATI {r.status_code} for {formatted}: {r.text[:200]}")
-        return False
+        return None if r.status_code >= 500 or r.status_code in (401, 403, 429) else False
     except Exception as e:
         log.error(f"Declan WATI request failed for {formatted}: {e}")
-        return False
+        return None
 
 
 def declan_effective_day(enquiry_dt):
