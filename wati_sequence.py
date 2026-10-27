@@ -959,14 +959,14 @@ TPA_UKDT_SEQUENCE = [
     {"step": 2, "template": "ukdt_tpa_day2",  "day": 1,  "at_hour": 13, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
     {"step": 3, "template": "ukdt_tpa_day3",  "day": 2,  "at_hour": 11, "dz": "declan", "max_late_h": 4},
     {"step": 4, "template": "ukdt_tpa_day5",  "day": 4,  "at_hour": 13, "dz": "declan", "max_late_h": 4},
-    {"step": 5, "template": "ukdt_tpa_day7",  "day": 6,  "at_hour": 20, "dz": "declan", "max_late_h": 4},
+    {"step": 5, "template": "ukdt_tpa_day7",  "day": 6,  "at_hour": 20, "dz": "declan", "max_late_h": 4, "prefer": ["ukdt_tpa_day7_v2"]},
     {"step": 6, "template": "ukdt_tpa_day11", "day": 10, "at_hour": 13, "dz": "declan", "max_late_h": 4},
 ]
 TPA_BST_SEQUENCE = [
     {"step": 1, "template": "eod_all",        "day": 0,  "at_hour": 20, "dz": "declan", "max_late_h": 4},
     {"step": 2, "template": "bst_tpa_day2",   "day": 1,  "at_hour": 13, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
     {"step": 3, "template": "bst_tpa_day3",   "day": 2,  "at_hour": 11, "dz": "declan", "max_late_h": 4},
-    {"step": 4, "template": "bst_tpa_day5",   "day": 4,  "at_hour": 13, "dz": "declan", "max_late_h": 4},
+    {"step": 4, "template": "bst_tpa_day5",   "day": 4,  "at_hour": 13, "dz": "declan", "max_late_h": 4, "prefer": ["bst_tpa_day5_v2"]},
     {"step": 5, "template": "bst_tpa_day7",   "day": 6,  "at_hour": 20, "dz": "declan", "max_late_h": 4},
     {"step": 6, "template": "bst_tpa_day11",  "day": 10, "at_hour": 13, "dz": "declan", "max_late_h": 4},
 ]
