@@ -69,24 +69,26 @@ DRY_RUN       = os.getenv("DECLAN_DRY_RUN", "1") == "1"   # SAFE DEFAULT: dry ru
 # ── Sequence definitions: (step, template, day_offset, hour) ──
 # day_offset is days AFTER the enquiry day (enquiry day = offset 0).
 # A step is due when now >= enquiry_date + day_offset days, at >= hour:00 local.
+# 27/10: Declan asked for the DHD sequence on his UKDT/BST leads. Days 3-11 use the DHD templates (brand-neutral copy);
+# EOD stays ct_eod/bailiff_eod because dhd_eod_all names Debt Help Direct; day 2 copy is already identical.
 BST_SEQUENCE = [
     (0, "__SKIP__",        0,  0),   # W0 handled by poller
     (1, "bailiff_eod",     0,  20),
     (2, "day_2_midday",    1,  13),
-    (3, "bailiff_day_3",   2,  11),   # 27/10 DHD timing
-    (4, "bailiff_day_5",   4,  13),
-    (5, "bailiff_day_7",   6,  20),
-    (6, "bailiff_day_11",  10, 13),
+    (3, "dhd_bai_day3",    2,  11),   # 27/10 DHD timing + wording
+    (4, "dhd_bai_day5",    4,  13),
+    (5, "dhd_bai_day7",    6,  20),
+    (6, "dhd_bai_day11",   10, 13),
 ]
 
 CT_SEQUENCE = [
     (0, "__SKIP__",          0,  0),   # ukdt_ct_w0 handled by poller
     (1, "ct_eod",            0,  20),
     (2, "ct_day_2_midday",   1,  13),
-    (3, "ct_day3",           2,  11),   # 27/10 DHD timing
-    (4, "ct_day5",           4,  13),
-    (5, "ct_day7",           6,  20),
-    (6, "ct_day11",          10, 13),
+    (3, "dhd_ct_day3",       2,  11),   # 27/10 DHD timing + wording
+    (4, "dhd_ct_day5",       4,  13),
+    (5, "dhd_ct_day7",       6,  20),
+    (6, "dhd_ct_day11",      10, 13),
 ]
 
 # Templates that take a {{name}} param. Any template NOT listed sends with no params.
@@ -419,28 +421,12 @@ def process(svc):
     return total
 
 
-def _log_template_text():
-    """Print the body of each template the sequences use, once at start (read-only), so the copy can
-    be reviewed from the logs without anyone handling the WATI token."""
-    want = {t for c in CAMPAIGNS for _, t, _, _ in c["sequence"] if not t.startswith("__")}
-    try:
-        r = requests.get(f"{WATI_API_URL_DECLAN}/api/v1/getMessageTemplates?pageSize=500",
-                         headers={"Authorization": f"Bearer {WATI_TOKEN_DECLAN}"}, timeout=30)
-        for t in (r.json().get("messageTemplates") or []):
-            if t.get("elementName") in want:
-                body = (t.get("body") or t.get("bodyOriginal") or "").replace("\n", " / ")
-                log.info(f"TEMPLATE {t.get('elementName')} [{t.get('status')}]: {body}")
-    except Exception as e:
-        log.warning(f"template text dump failed: {e}")
-
-
 def main():
     log.info(f"Declan sequence starting... DRY_RUN={DRY_RUN} poll={POLL_INTERVAL}s cap={DAILY_CAP} "
              f"campaigns={[c['name'] for c in CAMPAIGNS]}")
     if not WATI_TOKEN_DECLAN and not DRY_RUN:
         log.error("WATI_TOKEN_DECLAN not set and not dry run — refusing to start")
         return
-    _log_template_text()
     creds = get_credentials()
     svc = build("sheets", "v4", credentials=creds)
     while True:
