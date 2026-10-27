@@ -419,12 +419,28 @@ def process(svc):
     return total
 
 
+def _log_template_text():
+    """Print the body of each template the sequences use, once at start (read-only), so the copy can
+    be reviewed from the logs without anyone handling the WATI token."""
+    want = {t for c in CAMPAIGNS for _, t, _, _ in c["sequence"] if not t.startswith("__")}
+    try:
+        r = requests.get(f"{WATI_API_URL_DECLAN}/api/v1/getMessageTemplates?pageSize=500",
+                         headers={"Authorization": f"Bearer {WATI_TOKEN_DECLAN}"}, timeout=30)
+        for t in (r.json().get("messageTemplates") or []):
+            if t.get("elementName") in want:
+                body = (t.get("body") or t.get("bodyOriginal") or "").replace("\n", " / ")
+                log.info(f"TEMPLATE {t.get('elementName')} [{t.get('status')}]: {body}")
+    except Exception as e:
+        log.warning(f"template text dump failed: {e}")
+
+
 def main():
     log.info(f"Declan sequence starting... DRY_RUN={DRY_RUN} poll={POLL_INTERVAL}s cap={DAILY_CAP} "
              f"campaigns={[c['name'] for c in CAMPAIGNS]}")
     if not WATI_TOKEN_DECLAN and not DRY_RUN:
         log.error("WATI_TOKEN_DECLAN not set and not dry run — refusing to start")
         return
+    _log_template_text()
     creds = get_credentials()
     svc = build("sheets", "v4", credentials=creds)
     while True:
