@@ -471,7 +471,7 @@ CRM_PRESENCE_URL = os.getenv("CRM_PRESENCE_URL", "https://regen-crm.onrender.com
 # they ever wrote back on WhatsApp (booking from the link isn't a reply). Covers Regen's and TPA's enquiries.
 # The CRM gives hashed phones; fail-open (if the CRM can't be reached, the reply checks still apply).
 CRM_STOPS_URL = os.getenv("CRM_STOPS_URL", "https://regen-crm.onrender.com/api/public/chase-stops")
-_crm_stops = {"at": 0.0, "booked": set(), "spoken": set(), "tpa": set(), "tpa_hours": None}
+_crm_stops = {"at": 0.0, "booked": set(), "spoken": set(), "dnc": set(), "tpa": set(), "tpa_hours": None}
 
 def crm_stop_reason(phone):
     import hashlib
@@ -480,7 +480,7 @@ def crm_stop_reason(phone):
             r = requests.get(CRM_STOPS_URL, timeout=30)
             j = r.json() if r.status_code == 200 else {}
             if j.get("ok"):
-                _crm_stops.update(at=time.time(), booked=set(j.get("booked") or []), spoken=set(j.get("spoken") or []),
+                _crm_stops.update(at=time.time(), booked=set(j.get("booked") or []), spoken=set(j.get("spoken") or []), dnc=set(j.get("dnc") or []),
                                   tpa=set(j.get("tpa") or []), tpa_hours=j.get("tpaHours") or None)
         except Exception as e:
             log.warning(f"CRM stop list unavailable: {e}")
@@ -488,6 +488,8 @@ def crm_stop_reason(phone):
     if len(d) < 10:
         return None
     h = hashlib.sha256(d.encode()).hexdigest()[:20]
+    if h in _crm_stops["dnc"]:
+        return "asked to be removed"
     if h in _crm_stops["booked"]:
         return "callback set"
     if h in _crm_stops["spoken"]:
@@ -1316,7 +1318,10 @@ def process_sequences(service):
             # 25/10: look at the WhatsApp thread before every send, not only at enrolment. If they have
             # written to us in the last week the team owns that chat - stop and mark them replied,
             # even when the reply webhook missed it. Fail-open: if WATI can't be asked, send as before.
-            _stop = None if booking_pending else crm_stop_reason(lead["phone"])
+            # 27/10 (Aaron): asked to be removed -> never another message, booking pending or not
+            _stop = crm_stop_reason(lead["phone"])
+            if booking_pending and _stop != "asked to be removed":
+                _stop = None
             if _stop:
                 update_tracking_row(service, track["row"], current_step, track.get("last_sent", ""),
                                     _stop, tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
