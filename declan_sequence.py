@@ -73,22 +73,20 @@ BST_SEQUENCE = [
     (0, "__SKIP__",        0,  0),   # W0 handled by poller
     (1, "bailiff_eod",     0,  20),
     (2, "day_2_midday",    1,  13),
-    (3, "bailiff_day_3",   2,  13),
+    (3, "bailiff_day_3",   2,  11),   # 27/10 DHD timing
     (4, "bailiff_day_5",   4,  13),
     (5, "bailiff_day_7",   6,  20),
     (6, "bailiff_day_11",  10, 13),
-    (7, "bailiff_day_14",  13, 13),
 ]
 
 CT_SEQUENCE = [
     (0, "__SKIP__",          0,  0),   # ukdt_ct_w0 handled by poller
     (1, "ct_eod",            0,  20),
     (2, "ct_day_2_midday",   1,  13),
-    (3, "ct_day3",           2,  13),
+    (3, "ct_day3",           2,  11),   # 27/10 DHD timing
     (4, "ct_day5",           4,  13),
     (5, "ct_day7",           6,  20),
     (6, "ct_day11",          10, 13),
-    (7, "ct_day14",          13, 13),
 ]
 
 # Templates that take a {{name}} param. Any template NOT listed sends with no params.
