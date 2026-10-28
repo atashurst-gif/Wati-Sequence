@@ -441,28 +441,12 @@ def process(svc):
     return total
 
 
-def _log_instant_templates():
-    """One-off (28/10): print dhd_ct_instant / dhd_bai_instant text and buttons for the Regen copies."""
-    try:
-        r = requests.get(f"{WATI_API_URL_DECLAN}/api/v1/getMessageTemplates?pageSize=500",
-                         headers={"Authorization": f"Bearer {WATI_TOKEN_DECLAN}"}, timeout=30)
-        for t in (r.json().get("messageTemplates") or []):
-            if t.get("elementName") in ("dhd_ct_instant", "dhd_bai_instant"):
-                body = (t.get("body") or t.get("bodyOriginal") or "").replace("\n", " / ")
-                log.info(f"INSTANT {t.get('elementName')} [{t.get('status')}] cat={t.get('category')} header={t.get('header')} "
-                         f"footer={t.get('footer')} buttons={t.get('buttons')} buttonsType={t.get('buttonsType')} "
-                         f"params={t.get('customParams')}: {body}")
-    except Exception as e:
-        log.warning(f"instant template dump failed: {e}")
-
-
 def main():
     log.info(f"Declan sequence starting... DRY_RUN={DRY_RUN} poll={POLL_INTERVAL}s cap={DAILY_CAP} "
              f"campaigns={[c['name'] for c in CAMPAIGNS]}")
     if not WATI_TOKEN_DECLAN and not DRY_RUN:
         log.error("WATI_TOKEN_DECLAN not set and not dry run — refusing to start")
         return
-    _log_instant_templates()
     creds = get_credentials()
     svc = build("sheets", "v4", credentials=creds)
     while True:
