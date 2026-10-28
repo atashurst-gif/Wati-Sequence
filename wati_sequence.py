@@ -1336,7 +1336,11 @@ def process_sequences(service):
             if is_at_hour:
                 # Evening messages only ever go out in their own hour (20:xx for the EOD,
                 # 19:xx for fu1). Never 2am, never 10pm.
-                if datetime.datetime.now(UK_TZ).hour != next_msg["at_hour"]:
+                # Declan's steps (as on his own tenant): any time from the due hour until max_late_h later, 09:00-21:00
+                if next_msg.get("dz") == "declan":
+                    if not (9 <= datetime.datetime.now(UK_TZ).hour < 21):
+                        continue
+                elif datetime.datetime.now(UK_TZ).hour != next_msg["at_hour"]:
                     continue
             elif not (tpa_open_now() if crm_is_tpa(lead["phone"]) else is_within_sending_window()):
                 log.debug(f"{tl_ref}: outside sending window, will send next window")
