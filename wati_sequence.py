@@ -955,7 +955,7 @@ def _w0_first_step_delay(sequence):
 # sequence (1 EOD, 2 day 1, 3 day 2/3, 5 day 6/7), so a lead switching over mid-way carries on at the right point.
 # Used only once all ten templates are APPROVED on Regen's WATI; until then his leads stay on the Regen sequence.
 TPA_UKDT_SEQUENCE = [
-    {"step": 1, "template": "eod_all",        "day": 0,  "at_hour": 20, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
+    {"step": 1, "template": "eod_all",        "day": 0,  "at_hour": 20, "min_gap_h": 12, "dz": "declan", "max_late_h": 4, "prefer": ["ukdt_tpa_eod"]},
     {"step": 2, "template": "ukdt_tpa_day2",  "day": 1,  "at_hour": 13, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
     {"step": 3, "template": "ukdt_tpa_day3",  "day": 2,  "at_hour": 11, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
     {"step": 4, "template": "ukdt_tpa_day5",  "day": 4,  "at_hour": 13, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
@@ -963,7 +963,7 @@ TPA_UKDT_SEQUENCE = [
     {"step": 6, "template": "ukdt_tpa_day11", "day": 10, "at_hour": 13, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
 ]
 TPA_BST_SEQUENCE = [
-    {"step": 1, "template": "eod_all",        "day": 0,  "at_hour": 20, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
+    {"step": 1, "template": "eod_all",        "day": 0,  "at_hour": 20, "min_gap_h": 12, "dz": "declan", "max_late_h": 4, "prefer": ["bst_tpa_eod"]},
     {"step": 2, "template": "bst_tpa_day2",   "day": 1,  "at_hour": 13, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
     {"step": 3, "template": "bst_tpa_day3",   "day": 2,  "at_hour": 11, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
     {"step": 4, "template": "bst_tpa_day5",   "day": 4,  "at_hour": 13, "min_gap_h": 12, "dz": "declan", "max_late_h": 4, "prefer": ["bst_tpa_day5_v2"]},
