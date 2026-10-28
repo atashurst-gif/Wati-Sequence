@@ -297,15 +297,28 @@ def approved_templates():
         return _approved["names"]
     _approved["at"] = time.time()
     try:
-        r = requests.get(f"{WATI_API_URL}/api/v1/getMessageTemplates?pageSize=300&pageNumber=1",
-                         headers={"Authorization": f"Bearer {WATI_TOKEN}", "accept": "application/json"}, timeout=30)
-        names = {t.get("elementName") for t in (r.json().get("messageTemplates") or [])
-                 if "approved" in str(t.get("status", "")).lower()}
+        names, page = set(), 1
+        while page <= 20:            # every page, so a newly added template is never missed
+            r = requests.get(f"{WATI_API_URL}/api/v1/getMessageTemplates?pageSize=100&pageNumber={page}",
+                             headers={"Authorization": f"Bearer {WATI_TOKEN}", "accept": "application/json"}, timeout=30)
+            items = r.json().get("messageTemplates") or []
+            names |= {t.get("elementName") for t in items if "approved" in str(t.get("status", "")).lower()}
+            if len(items) < 100:
+                break
+            page += 1
         if names:
+            watch = sorted(TPA_WATCH & names)
+            if watch != _approved.get("watch"):
+                log.info(f"TPA templates approved: {watch} | still waiting: {sorted(TPA_WATCH - names)}")
+                _approved["watch"] = watch
             _approved["names"] = names
     except Exception as e:
         log.warning(f"approved-templates check failed: {e}")
     return _approved["names"]
+
+
+# Declan's (TPA) templates that switch in once approved - logged as each one lands
+TPA_WATCH = {"ukdt_tpa_eod", "bst_tpa_eod", "ukdt_tpa_instant", "bst_tpa_instant", "ukdt_tpa_day7_v2", "bst_tpa_day5_v2"}
 
 
 def next_step_cfg(sequence, current_step):
@@ -980,10 +993,9 @@ def tpa_templates_ready() -> bool:
         return _tpa_ready["ok"]
     ok = _tpa_ready["ok"]
     try:
-        r = requests.get(f"{WATI_API_URL}/api/v1/getMessageTemplates?pageSize=1000",
-                         headers={"Authorization": f"Bearer {WATI_TOKEN}"}, timeout=30)
-        approved = {t.get("elementName") for t in (r.json().get("messageTemplates") or [])
-                    if str(t.get("status", "")).upper() == "APPROVED"}
+        approved = set(approved_templates()) or set()
+        if not approved:
+            raise RuntimeError("no template list yet")
         missing = sorted(_TPA_TEMPLATES - approved)
         ok = not missing
         if missing != _tpa_ready["missing"]:
