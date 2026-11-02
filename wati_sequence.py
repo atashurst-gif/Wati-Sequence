@@ -109,7 +109,7 @@ SAME_PERSON_DAYS = int(os.getenv("SAME_PERSON_DAYS", "14"))
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 MAX_SENDS_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_CYCLE", "12"))  # per-cycle drip feed, not a burst
 MAX_SENDS_PER_HOUR = int(os.getenv("MAX_SENDS_PER_HOUR", "14"))  # measured total send pace
-MAX_SENDS_PER_DAY = int(os.getenv("MAX_SENDS_PER_DAY", "145"))  # hard daily ceiling on actual sends
+MAX_SENDS_PER_DAY = int(os.getenv("MAX_SENDS_PER_DAY", "120"))  # hard daily ceiling on actual sends (2 Nov: 120 so sequence + CRM stay under ~150 a day while the number recovers)
 MAX_BACKLOG_SENDS_PER_DAY = int(os.getenv("MAX_BACKLOG_SENDS_PER_DAY", "130"))  # allows roughly 40 more backlog today
 _daily_sends = {}  # {date: count} — persists across cycles, auto-resets each day
 _hourly_sends = {}  # {(date, hour): count} — smooths backlog catch-up
@@ -256,14 +256,17 @@ BST_SEQUENCE = [
 # shape wrote (up to 16), so a lead part-way through anything carries on. "longtail" steps: their own daily allowance
 # after the core messages, sent only while WATI shows the template APPROVED, and day-7 finishers carry on into them.
 LONGTAIL_DAYS = [(21, 14), (22, 28), (23, 60), (24, 90), (25, 180)]
+# 2 Nov (Aaron, Meta spam warning on the number): the sequence now STOPS at day 14 - days 28/60/90/180 went to people who had
+# long gone cold and didn't recognise us. Older enquiries move to email. Only step 21 (day 14) is kept.
+LONGTAIL_STOP_AFTER_DAY = int(os.getenv("LONGTAIL_STOP_AFTER_DAY", "14"))
 # 26/10 20:05: every message says something different. New templates (submitted to WATI tonight) take over each step the
 # moment WATI shows them APPROVED ("prefer"); until then the existing approved template goes out ("template").
 #   UKDT: 14 check-in (council been back?), 28 bury-our-heads, 60 a plan, 90 what happens on the call, 180 rated Excellent
 #   BST:  14 check-in (bailiffs been back?), 28 bury-our-heads, 60 your rights, 90 fees set by law, 180 you're not alone
 _LT_UKDT = [("ukdt_fu3", None), ("ukdt_nc6", None), ("ukdt_nc7", None), ("ukdt_nc4", "ukdt_lt90"), ("ukdt_cbna4", "ukdt_lt180")]
 _LT_BST  = [("bst_fu3", None), ("bst_nc_6", None), ("bst_nc4", "bst_lt60"), ("bst_cbna4", "bst_lt90"), ("bst_fu2", "bst_lt180")]
-UKDT_SEQUENCE += [dict({"step": st, "template": t, "day": d, "longtail": True}, **({"prefer": [p]} if p else {})) for (st, d), (t, p) in zip(LONGTAIL_DAYS, _LT_UKDT)]
-BST_SEQUENCE += [dict({"step": st, "template": t, "day": d, "longtail": True}, **({"prefer": [p]} if p else {})) for (st, d), (t, p) in zip(LONGTAIL_DAYS, _LT_BST)]
+UKDT_SEQUENCE += [dict({"step": st, "template": t, "day": d, "longtail": True}, **({"prefer": [p]} if p else {})) for (st, d), (t, p) in zip(LONGTAIL_DAYS, _LT_UKDT) if d <= LONGTAIL_STOP_AFTER_DAY]
+BST_SEQUENCE += [dict({"step": st, "template": t, "day": d, "longtail": True}, **({"prefer": [p]} if p else {})) for (st, d), (t, p) in zip(LONGTAIL_DAYS, _LT_BST) if d <= LONGTAIL_STOP_AFTER_DAY]
 # day 7: no more "your enquiry's set to close tomorrow" now the follow-ups carry on - the check-in template once approved
 for _q, _p in ((UKDT_SEQUENCE, "ukdt_day7_checkin"), (BST_SEQUENCE, "bst_day7_checkin")):
     for _c in _q:
