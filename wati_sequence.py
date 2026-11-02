@@ -28,6 +28,22 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from zoneinfo import ZoneInfo
 
 import requests
+
+# ── 2 Nov (Aaron): moving Regen's WhatsApp to the UK number. WATI_SEND_CHANNEL (env) = the number template
+# messages go out from on Regen's WATI (eu-api.wati.io/602557 only - never Declan's). Unset = exactly as before.
+import os as _os_ch, requests as _rq_ch
+_WATI_SEND_CHANNEL = "".join(ch for ch in _os_ch.getenv("WATI_SEND_CHANNEL", "") if ch.isdigit())
+if _WATI_SEND_CHANNEL and not getattr(_rq_ch, "_chan_patched", False):
+    _orig_post = _rq_ch.post
+    def _post_with_channel(url, *a, **kw):
+        try:
+            if "/api/v2/sendTemplateMessages" in str(url) and "602557" in str(url) and isinstance(kw.get("json"), dict):
+                kw["json"].setdefault("channel_number", _WATI_SEND_CHANNEL)
+        except Exception:
+            pass
+        return _orig_post(url, *a, **kw)
+    _rq_ch.post = _post_with_channel
+    _rq_ch._chan_patched = True
 from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
