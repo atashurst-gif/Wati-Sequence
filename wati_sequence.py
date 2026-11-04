@@ -283,6 +283,11 @@ _LT_UKDT = [("ukdt_fu3", None), ("ukdt_nc6", None), ("ukdt_nc7", None), ("ukdt_n
 _LT_BST  = [("bst_fu3", None), ("bst_nc_6", None), ("bst_nc4", "bst_lt60"), ("bst_cbna4", "bst_lt90"), ("bst_fu2", "bst_lt180")]
 UKDT_SEQUENCE += [dict({"step": st, "template": t, "day": d, "longtail": True}, **({"prefer": [p]} if p else {})) for (st, d), (t, p) in zip(LONGTAIL_DAYS, _LT_UKDT) if d <= LONGTAIL_STOP_AFTER_DAY]
 BST_SEQUENCE += [dict({"step": st, "template": t, "day": d, "longtail": True}, **({"prefer": [p]} if p else {})) for (st, d), (t, p) in zip(LONGTAIL_DAYS, _LT_BST) if d <= LONGTAIL_STOP_AFTER_DAY]
+# 4 Nov (Aaron, Meta spam warnings; WhatsApp Manager read rates fall with every follow-up: fu4 57%, fu3 56%, TPA day 11 38%):
+# the day-7 message (step 5) and the TPA day-11 message (step 6) are stopped on Regen's number. SEQ_STOP_DAY7=0 brings day 7 back.
+if os.getenv("SEQ_STOP_DAY7", "1") == "1":
+    UKDT_SEQUENCE[:] = [c for c in UKDT_SEQUENCE if c["step"] != 5]
+    BST_SEQUENCE[:] = [c for c in BST_SEQUENCE if c["step"] != 5]
 # day 7: no more "your enquiry's set to close tomorrow" now the follow-ups carry on - the check-in template once approved
 for _q, _p in ((UKDT_SEQUENCE, "ukdt_day7_checkin"), (BST_SEQUENCE, "bst_day7_checkin")):
     for _c in _q:
@@ -1002,6 +1007,9 @@ TPA_BST_SEQUENCE = [
     {"step": 5, "template": "bst_tpa_day7",   "day": 6,  "at_hour": 20, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
     {"step": 6, "template": "bst_tpa_day11",  "day": 10, "at_hour": 13, "min_gap_h": 12, "dz": "declan", "max_late_h": 4},
 ]
+if os.getenv("SEQ_STOP_DAY7", "1") == "1":   # 4 Nov: TPA day 11 (38% read) stopped on Regen's number
+    TPA_UKDT_SEQUENCE[:] = [c for c in TPA_UKDT_SEQUENCE if c["step"] != 6]
+    TPA_BST_SEQUENCE[:] = [c for c in TPA_BST_SEQUENCE if c["step"] != 6]
 _TPA_TEMPLATES = {c["template"] for c in TPA_UKDT_SEQUENCE + TPA_BST_SEQUENCE}
 _tpa_ready = {"at": 0.0, "ok": False, "missing": None}
 
