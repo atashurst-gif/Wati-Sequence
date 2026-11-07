@@ -778,6 +778,42 @@ _NOT_A_REPLY = re.compile(r"filled in your form|full name:|phone number:|can i g
 _EMAIL_RE = re.compile(r"\S+@\S+\.\S+")
 
 
+# 7 Nov (Aaron): Meta flagged the UKDT number for spam. Repeat templates to people who never answer are what gets
+# reported, so nobody who has not replied gets more than NO_REPLY_CAP WhatsApp messages from us in NO_REPLY_DAYS
+# (the welcome plus one follow-up), whoever sent them - this service, the CRM's booking links, anything else.
+# Calls, SMS and email carry on. Anyone who replies is out of the sequence anyway. Fail-open if WATI can't be asked.
+NO_REPLY_CAP = int(os.getenv("NO_REPLY_CAP", "2"))
+NO_REPLY_DAYS = int(os.getenv("NO_REPLY_DAYS", "14"))
+
+
+def _sent_without_reply(phone, days=NO_REPLY_DAYS):
+    """How many messages we have sent this number in `days`; None if they have replied in that time or WATI fails."""
+    try:
+        r = requests.get(f"{WATI_API_URL}/api/v1/getMessages/{format_phone(phone)}?pageSize=60",
+                         headers={"Authorization": f"Bearer {WATI_TOKEN}", "accept": "application/json"}, timeout=20)
+        items = ((r.json().get("messages") or {}).get("items")) or []
+    except Exception as e:
+        log.warning(f"no-reply cap check failed for {phone}: {e}")
+        return None
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    n = 0
+    for m in items:
+        try:
+            d = datetime.datetime.fromisoformat(str(m.get("created"))[:19]).replace(tzinfo=datetime.timezone.utc)
+        except Exception:
+            continue
+        if d < cutoff:
+            continue
+        if m.get("owner") is False:
+            t = m.get("text") or ""
+            if not _NOT_A_REPLY.search(t):
+                return None          # a real reply: not capped
+            continue
+        if m.get("statusString") and str(m.get("statusString")).lower() not in ("failed", "deleted"):
+            n += 1
+    return n
+
+
 def _prior_reply_at(phone, days=7):
     """30/09: the reply webhook can only stamp leads already in the tracker, so a
     lead who replied to their W0 before enrolment got chased anyway (Hayley/Vicky).
@@ -1438,6 +1474,14 @@ def process_sequences(service):
                 update_lead_status(service, lead, "replied" if source_is_w0 else "Replied")
                 log.info(f"{tl_ref}: replied {_stamp} - sequence stopped before {next_msg['template']}")
                 continue
+
+            if not booking_pending and NO_REPLY_CAP > 0:
+                _n = _sent_without_reply(lead["phone"])
+                if _n is not None and _n >= NO_REPLY_CAP:
+                    update_tracking_row(service, track["row"], current_step, track.get("last_sent", ""),
+                                        "completed - no reply cap", tracking_tab=track.get("tracking_tab", TRACKING_SHEET))
+                    log.info(f"{tl_ref}: {_n} messages and no reply in {NO_REPLY_DAYS} days - WhatsApp stops here (spam guard), {next_msg['template']} not sent")
+                    continue
 
             _tpl = step_template(next_msg)
             if send_wati_template(lead["phone"], _tpl, lead["first_name"]):
